@@ -13,7 +13,7 @@ from collections import Counter
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from vjepa_ek100.protocol import build_val_clips, filter_annotations, index_videos  # noqa: E402
+from vjepa_ek100.protocol import build_val_clips, clip_frame_indices, filter_annotations, index_videos  # noqa: E402
 
 # Numbers for the official annotation release, used as a sanity check.
 EXPECTED = dict(train_rows=67217, val_rows=9668)
@@ -26,6 +26,7 @@ def main():
     p.add_argument("--val_csv", required=True)
     p.add_argument("--out_dir", required=True)
     p.add_argument("--probe_videos", action="store_true", help="read fps/resolution of every val video")
+    p.add_argument("--video_info", default=None, help="EPIC_100_video_info.csv, to detect truncated/re-encoded files")
     args = p.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -65,17 +66,49 @@ def main():
         for vid in clips["video_id"].unique():
             vr = VideoReader(videos[vid], ctx=cpu(0))
             h, w = vr[0].shape[:2]
-            meta[vid] = dict(fps=round(vr.get_avg_fps(), 2), frames=len(vr), h=h, w=w)
+            meta[vid] = dict(fps=vr.get_avg_fps(), frames=len(vr), h=h, w=w)
         report["video_meta"] = meta
-        fps = Counter(m["fps"] for m in meta.values())
+
+        if args.video_info:
+            vi = pd.read_csv(args.video_info).set_index("video_id")
+            mismatch = {}
+            for vid, m in meta.items():
+                ref_fps, ref_dur = vi.loc[vid, "fps"], vi.loc[vid, "duration"]
+                dur = m["frames"] / m["fps"]
+                if abs(m["fps"] - ref_fps) > 0.05 or abs(dur - ref_dur) > 1.0:
+                    mismatch[vid] = dict(fps=round(m["fps"], 2), ref_fps=round(ref_fps, 2), duration=round(dur, 1),
+                                         ref_duration=round(ref_dur, 1))
+            report["mismatch_vs_official_video_info"] = mismatch
+            if mismatch:
+                warnings.append(f"{len(mismatch)} videos differ from EPIC_100_video_info.csv (truncated/re-encoded?)")
+        # EK100 frame ids are at ~60fps for every video, but the official loader indexes the raw
+        # video with them, so on 30/48/90fps videos the clip lands at the wrong time (or past the end).
+        report["videos_where_frame_ids_are_not_native"] = {
+            vid: round(m["fps"], 2) for vid, m in meta.items() if abs(m["fps"] - 59.94) > 0.1
+        }
+        fps = Counter(round(m["fps"], 2) for m in meta.values())
         report["fps_histogram"] = {str(k): v for k, v in fps.items()}
-        # frame ids in the csv refer to the original 50/60fps videos, and the clip stride
-        # int(vfps / 8) changes with fps, so re-encoded videos change the protocol.
-        if any(f not in (50.0, 59.94, 60.0) for f in fps):
-            warnings.append(f"non-original fps found {dict(fps)}: annotation frame ids may not line up")
-        short = [v for v, m in meta.items() if m["frames"] < clips[clips.video_id == v].stop_frame.max()]
-        if short:
-            warnings.append(f"{len(short)} videos shorter than their annotations (re-encoded?): {short[:5]}")
+
+        # Clips whose frame window runs past the end of the video: decord raises on them, and
+        # the official loader silently drops them. Checked per clip with the real fps.
+        for anchor in ("official", "action_start"):
+            clips[f"expected_fail_{anchor}"] = [
+                int(clip_frame_indices(r.start_frame, r.stop_frame, meta[r.video_id]["fps"], anchor=anchor).max())
+                >= meta[r.video_id]["frames"]
+                for r in clips.itertuples()
+            ]
+        bad = clips[clips.expected_fail_official]
+        report["out_of_range_clips_official"] = int(len(bad))
+        report["out_of_range_by_video"] = {
+            vid: dict(clips=int(len(g)), of=int((clips.video_id == vid).sum()), fps=round(meta[vid]["fps"], 2),
+                      frames=meta[vid]["frames"], max_stop_frame=int(clips[clips.video_id == vid].stop_frame.max()))
+            for vid, g in bad.groupby("video_id")
+        }
+        if len(bad):
+            warnings.append(
+                f"{len(bad)} clips in {bad.video_id.nunique()} videos run past the end of the video; the official "
+                f"loader drops them too (see out_of_range_by_video)"
+            )
     report["warnings"] = warnings
 
     clips.to_csv(os.path.join(args.out_dir, "val_clips.csv"), index=False)

@@ -65,8 +65,10 @@ def test_filter_annotations_matches_official(vjepa2_root, tmp_path):
     assert "P02_101" not in set(clips.video_id)
 
 
-@pytest.mark.parametrize("world_size,batch_size,num_workers", [(3, 2, 2), (4, 3, 2), (2, 2, 0)])
-def test_multiplicity_matches_official_loop(vjepa2_root, tmp_path, world_size, batch_size, num_workers):
+@pytest.mark.parametrize(
+    "world_size,batch_size,num_workers,skip_frac", [(3, 2, 2, 0.0), (4, 3, 2, 0.0), (2, 2, 0, 0.0), (3, 2, 2, 0.15)]
+)
+def test_multiplicity_matches_official_loop(vjepa2_root, tmp_path, world_size, batch_size, num_workers, skip_frac):
     """Run the real webdataset + DataLoader pipeline rank by rank with the official
     `ipe`-bounded, restart-on-exhaustion loop and compare clip counts."""
     from evals.action_anticipation_frozen.epickitchens import filter_annotations as official
@@ -78,11 +80,13 @@ def test_multiplicity_matches_official_loop(vjepa2_root, tmp_path, world_size, b
     paths, annos = ref["val"]
     num_clips = sum(len(a) for a in annos.values())
     ipe = num_clips // (world_size * batch_size)
+    rng = np.random.default_rng(1)
+    skip = frozenset((v, int(sf)) for v, a in annos.items() for sf in a.start_frame if rng.random() < skip_frac)
 
     seen = Counter()
     for rank in range(world_size):
         _, info = get_video_wds_dataset(
-            batch_size=batch_size, input_shards=paths, video_decoder=FakeDecoder(annos), training=False,
+            batch_size=batch_size, input_shards=paths, video_decoder=FakeDecoder(annos, skip), training=False,
             world_size=world_size, rank=rank, num_workers=num_workers, persistent_workers=False, pin_memory=False,
         )
         it = iter(info.dataloader)
@@ -100,5 +104,7 @@ def test_multiplicity_matches_official_loop(vjepa2_root, tmp_path, world_size, b
     verbs, nouns, actions, vdf_f = filter_annotations(pd.read_csv(tmp_path / "train.csv"), pd.read_csv(tmp_path / "val.csv"))
     clips = build_val_clips(vdf_f, verbs, nouns, actions, index_videos(str(tmp_path)))
     key = dict(zip(clips.clip_id, zip(clips.video_id, clips.start_frame)))
-    ours = Counter({key[c]: n for c, n in official_eval_multiplicity(clips, world_size, batch_size, num_workers).items()})
+    skipped = {c for c, k in key.items() if k in skip}
+    counts = official_eval_multiplicity(clips, world_size, batch_size, num_workers, skipped=skipped)
+    ours = Counter({key[c]: n for c, n in counts.items()})
     assert ours == seen

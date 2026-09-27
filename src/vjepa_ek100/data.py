@@ -1,7 +1,10 @@
 """Map-style EK100 val dataset (resumable, shardable) that decodes clips like vjepa2."""
 
+import atexit
+import gc
+
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, get_worker_info
 
 from .protocol import clip_frame_indices
 
@@ -22,6 +25,12 @@ class EK100ClipDataset(Dataset):
 
     def __len__(self):
         return len(self.clips)
+
+    def close(self):
+        """Drop the VideoReader while decord's threads are still valid."""
+        self._vr = None
+        self._vr_path = None
+        gc.collect()
 
     def _reader(self, path):
         if path != self._vr_path:
@@ -55,6 +64,14 @@ class EK100ClipDataset(Dataset):
             self._vr_path = None
             video = torch.zeros(3, self.frames_per_clip, 1, 1)
         return dict(video=video, clip_id=int(r.clip_id), ok=ok)
+
+
+def worker_init_fn(_):
+    """Release decord before interpreter teardown in each DataLoader worker.
+
+    Otherwise a worker can abort on exit with 'pure virtual method called' (seen on Kaggle T4).
+    """
+    atexit.register(get_worker_info().dataset.close)
 
 
 def collate(batch):

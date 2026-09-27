@@ -117,7 +117,7 @@ def clip_frame_indices(
     return indices
 
 
-def official_eval_multiplicity(clips, world_size=64, batch_size=2, num_workers=2):
+def official_eval_multiplicity(clips, world_size=64, batch_size=2, num_workers=2, skipped=()):
     """How many times each clip is counted by the official distributed val loop.
 
     The official `validate` runs exactly `ipe = num_clips // (world_size * batch_size)`
@@ -128,6 +128,8 @@ def official_eval_multiplicity(clips, world_size=64, batch_size=2, num_workers=2
     the real webdataset/DataLoader pipeline.
 
     :param clips: DataFrame from `build_val_clips` (needs clip_id, video_order, clip_order)
+    :param skipped: clip_ids the official decoder drops (decode error, frames past the end of
+        the video). They vanish from the stream, but `ipe` still counts them.
     :returns: Counter clip_id -> count
     """
     clips = clips.sort_values(["video_order", "clip_order"])
@@ -135,13 +137,14 @@ def official_eval_multiplicity(clips, world_size=64, batch_size=2, num_workers=2
     num_clips = sum(len(v) for v in per_video)
     ipe = num_clips // (world_size * batch_size)
 
+    skipped = set(skipped)
     counts = Counter()
     for rank in range(world_size):
         rank_videos = per_video[rank::world_size]
         # wds.split_by_worker, then wds.batched(partial=True) inside each worker
         worker_batches = []
         for w in range(max(num_workers, 1)):
-            stream = [c for vid in rank_videos[w :: max(num_workers, 1)] for c in vid]
+            stream = [c for vid in rank_videos[w :: max(num_workers, 1)] for c in vid if c not in skipped]
             worker_batches.append([stream[i : i + batch_size] for i in range(0, len(stream), batch_size)])
         # DataLoader interleaves workers round-robin, skipping exhausted ones
         epoch = []

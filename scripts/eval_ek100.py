@@ -20,7 +20,7 @@ import torch.nn.functional as F
 import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from vjepa_ek100.data import EK100ClipDataset, collate  # noqa: E402
+from vjepa_ek100.data import EK100ClipDataset, collate, worker_init_fn  # noqa: E402
 from vjepa_ek100.model import add_vjepa2_to_path, build_backbone, build_probe, eval_transform  # noqa: E402
 
 DTYPES = dict(fp16=torch.float16, bf16=torch.bfloat16, fp32=torch.float32)
@@ -31,6 +31,19 @@ def done_clip_ids(shard_dir):
     for f in glob.glob(os.path.join(shard_dir, "chunk_*.npz")):
         done.update(np.load(f)["clip_id"].tolist())
     return done
+
+
+def load_failed(shard_dir):
+    path = os.path.join(shard_dir, "failed.json")
+    if not os.path.exists(path):
+        return set()
+    with open(path) as f:
+        return set(json.load(f))
+
+
+def save_failed(shard_dir, failed):
+    with open(os.path.join(shard_dir, "failed.json"), "w") as f:
+        json.dump(sorted(int(c) for c in failed), f)
 
 
 def pool_tokens(x, grid, pool):
@@ -76,13 +89,14 @@ def main():
     clips = clips[clips.video_order % args.num_shards == args.shard_id]
     shard_dir = os.path.join(args.out_dir, f"{args.anchor}", f"shard{args.shard_id}")
     os.makedirs(shard_dir, exist_ok=True)
-    done = done_clip_ids(shard_dir)
+    prev_failed = load_failed(shard_dir)  # clips that cannot be decoded count as done
+    done = done_clip_ids(shard_dir) | prev_failed
     todo = clips[~clips.clip_id.isin(done)]
     if args.max_clips:
         todo = todo.iloc[: args.max_clips]
     print(f"shard {args.shard_id}/{args.num_shards}: {len(clips)} clips, {len(done)} done, {len(todo)} to go")
     if len(todo) == 0:
-        return
+        return 0
 
     model = build_backbone(cfg, args.vitl_ckpt, device)
     probe = build_probe(
@@ -104,11 +118,12 @@ def main():
         anchor=args.anchor,
     )
     loader = torch.utils.data.DataLoader(
-        ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate, pin_memory=True
+        ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate, pin_memory=True,
+        worker_init_fn=worker_init_fn if args.num_workers > 0 else None,
     )
 
     buf = dict(clip_id=[], verb=[], noun=[], action=[], feats=[])
-    failed, n_fp32_retry = [], 0
+    failed, stats = [], dict(clips=0, fp32_retries=0)
     chunk = len(glob.glob(os.path.join(shard_dir, "chunk_*.npz")))
 
     def flush():
@@ -117,44 +132,54 @@ def main():
             return
         out = {k: np.concatenate(v) for k, v in buf.items() if v}
         np.savez(os.path.join(shard_dir, f"chunk_{chunk:05d}.npz"), **out)
+        stats["clips"] += len(out["clip_id"])
         chunk += 1
         for v in buf.values():
             v.clear()
 
-    t0, seen = time.time(), 0
+    t0, crash = time.time(), None
     grid = data_cfg["resolution"] // 16
-    with torch.inference_mode():
-        for batch in loader:
-            failed += batch["failed"]
-            if batch["video"] is None:
-                continue
-            x = batch["video"].to(device, non_blocking=True)
-            ats = torch.full((x.shape[0],), at, device=device)
-            with torch.autocast(device.type, dtype=dtype, enabled=dtype != torch.float32):
-                feats = model(x, ats)
-                if not torch.isfinite(feats).all():  # fp16 overflow: redo this batch in fp32
-                    n_fp32_retry += 1
-                    with torch.autocast(device.type, enabled=False):
-                        feats = model(x.float(), ats)
-                out = probe(feats)
-            buf["clip_id"].append(batch["clip_id"].numpy())
-            for k in ("verb", "noun", "action"):
-                buf[k].append(out[k].float().cpu().numpy().astype(np.float16))
-            if args.save_feats_pool:
-                buf["feats"].append(pool_tokens(feats, grid, args.save_feats_pool).cpu().numpy().astype(np.float16))
-            seen += x.shape[0]
-            if sum(len(c) for c in buf["clip_id"]) >= args.save_every:
-                flush()
-                el = time.time() - t0
-                print(f"{seen}/{len(todo)} clips  {seen / el:.2f} clip/s  eta {(len(todo) - seen) / (seen / el) / 60:.1f} min")
+    try:
+        with torch.inference_mode():
+            for batch in loader:
+                failed += batch["failed"]
+                if batch["video"] is None:
+                    continue
+                x = batch["video"].to(device, non_blocking=True)
+                ats = torch.full((x.shape[0],), at, device=device)
+                with torch.autocast(device.type, dtype=dtype, enabled=dtype != torch.float32):
+                    feats = model(x, ats)
+                    if not torch.isfinite(feats).all():  # fp16 overflow: redo this batch in fp32
+                        stats["fp32_retries"] += 1
+                        with torch.autocast(device.type, enabled=False):
+                            feats = model(x.float(), ats)
+                    out = probe(feats)
+                buf["clip_id"].append(batch["clip_id"].numpy())
+                for k in ("verb", "noun", "action"):
+                    buf[k].append(out[k].float().cpu().numpy().astype(np.float16))
+                if args.save_feats_pool:
+                    buf["feats"].append(pool_tokens(feats, grid, args.save_feats_pool).cpu().numpy().astype(np.float16))
+                if sum(len(c) for c in buf["clip_id"]) >= args.save_every:
+                    flush()
+                    rate = stats["clips"] / (time.time() - t0)
+                    eta = (len(todo) - stats["clips"]) / rate / 60
+                    print(f"{stats['clips']}/{len(todo)} clips  {rate:.2f} clip/s  eta {eta:.1f} min", flush=True)
+    except RuntimeError as e:  # e.g. a DataLoader worker aborted: keep what we have, a rerun resumes
+        crash = repr(e)
+        print(f"[error] {crash}", flush=True)
     flush()
+    save_failed(shard_dir, prev_failed | set(failed))
+    remaining = len(clips) - len(done_clip_ids(shard_dir) | prev_failed | set(failed))
     el = time.time() - t0
-    stats = dict(clips=seen, seconds=el, clips_per_sec=seen / max(el, 1e-6), failed=failed, fp32_retries=n_fp32_retry,
-                 dtype=args.dtype, anchor=args.anchor, device=torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu")
+    stats.update(seconds=el, clips_per_sec=stats["clips"] / max(el, 1e-6), failed=failed, remaining_in_shard=remaining,
+                 crash=crash, dtype=args.dtype, anchor=args.anchor,
+                 device=torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu")
     with open(os.path.join(shard_dir, f"run_{int(time.time())}.json"), "w") as f:
         json.dump(stats, f, indent=2)
     print(json.dumps(stats, indent=2))
+    # 3 = crashed with work left in the shard: just run the same command again
+    return 3 if crash and remaining > 0 and not args.max_clips else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

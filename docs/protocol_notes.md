@@ -27,7 +27,18 @@ Nguồn: `evals/action_anticipation_frozen/` và `configs/inference/vitl/ek100.y
    Vì mỗi rank giữ `videos[rank::64]` với số clip rất chênh lệch, có clip bị đếm nhiều lần và có clip không được
    đếm. `protocol.official_eval_multiplicity` mô phỏng lại việc này. Test so sánh với pipeline
    webdataset + DataLoader thật cho kết quả khớp hoàn toàn. `compute_metrics.py` báo cả hai con số **official** và **clean**.
-4. **fps của video.** Bước lấy mẫu là `int(vfps/8)`: bằng 7 ở 60fps và 6 ở 50fps. Nếu video đã bị encode lại
-   (ví dụ 30fps), cả khoảng thời gian quan sát lẫn frame id trong CSV đều lệch. `prepare_ek100.py --probe_videos` sẽ cảnh báo.
+4. **Frame id trong annotation luôn tính theo ~60fps, nhưng code gốc dùng thẳng trên video gốc.**
+   Tập val có 133 video 59.94fps, 3 video 29.97fps, 1 video 47.95fps, 1 video 90fps. Dataset Kaggle khớp đúng với
+   `EPIC_100_video_info.csv`, nên đây là video gốc, không bị encode lại. Ví dụ `P09_07` (29.97fps, dài 55s) có
+   `stop_frame = 3071` = 51.19s × 60. Vì vậy trên 5 video không phải 60fps, clip do code gốc cắt ra rơi **sai thời điểm**
+   (ở video 30fps là gấp đôi thời gian thật), hoặc vượt quá cuối video. Khi vượt quá, decord báo lỗi và code gốc
+   **bỏ qua clip đó âm thầm**.
+   - Để tái tạo 32.7, ta giữ nguyên hành vi này, vì lần chạy của Meta dùng cùng những video gốc đó.
+     `prepare_ek100.py --probe_videos --video_info ...` dự đoán clip nào sẽ lỗi (cột `expected_fail_*`,
+     mục `out_of_range_by_video`, `videos_where_frame_ids_are_not_native`).
+   - Clip lỗi bị loại khỏi cả hai metric. Phần mô phỏng official bỏ chúng khỏi luồng dữ liệu, nhưng vẫn tính vào `ipe`, giống code gốc.
+   - Với giao thức chuẩn dùng cho nghiên cứu: phải lấy frame theo `timestamp × fps thật` (việc cần làm tiếp).
 5. **Độ chính xác số.** Paper dùng bf16, T4 thì dùng fp16. Nếu gặp tràn số (NaN hoặc inf), batch đó được tính lại bằng fp32 (`fp32_retries` trong log).
-6. Clip decode lỗi bị code gốc bỏ qua âm thầm. Ở đây chúng được ghi vào `failed` trong `run_*.json`.
+6. Clip decode lỗi bị code gốc bỏ qua âm thầm. Ở đây chúng được ghi vào `shard*/failed.json` (gộp qua các lần chạy).
+7. Trên Kaggle, DataLoader worker từng bị chết khi thoát (`pure virtual method called`, do decord). Cách xử lý:
+   giải phóng VideoReader bằng `atexit` trong mỗi worker, và nếu vẫn crash thì lưu phần đã làm, thoát mã 3 rồi tự chạy lại.

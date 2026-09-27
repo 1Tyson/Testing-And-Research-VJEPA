@@ -42,6 +42,7 @@ def main():
     p.add_argument("--world_size", type=int, default=64, help="official inference: 8 nodes x 8 gpus")
     p.add_argument("--batch_size", type=int, default=2)
     p.add_argument("--num_workers", type=int, default=2)
+    p.add_argument("--allow_partial", action="store_true", help="report even if some clips were not evaluated yet")
     args = p.parse_args()
 
     clips = pd.read_csv(os.path.join(args.work_dir, "val_clips.csv"))
@@ -50,17 +51,36 @@ def main():
     n_cls = dict(verb=len(classes["verbs"]), noun=len(classes["nouns"]), action=len(classes["actions"]))
 
     lg = load_logits(args.logits_dir)
+
+    # Clips that cannot be decoded (errors seen at eval time, or windows past the video end).
+    # The official loader drops these silently; they are excluded from both metrics.
+    failed = set()
+    for f in glob.glob(os.path.join(args.logits_dir, "shard*", "failed.json")):
+        with open(f) as fh:
+            failed.update(json.load(fh))
+    anchor = os.path.basename(os.path.normpath(args.logits_dir))
+    col = f"expected_fail_{anchor}"
+    expected_fail = set(clips.clip_id[clips[col]].tolist()) if col in clips else set()
+    skipped = failed | expected_fail
+    missing = set(clips.clip_id.tolist()) - set(lg["clip_id"].tolist()) - skipped
+    if missing and not args.allow_partial:
+        raise SystemExit(f"{len(missing)} clips not evaluated yet: rerun eval_ek100.py (or pass --allow_partial)")
+    keep = ~np.isin(lg["clip_id"], list(skipped))
+    lg = {k: v[keep] for k, v in lg.items()}
     lab = clips.set_index("clip_id").loc[lg["clip_id"]]
     labels = dict(verb=lab.verb_idx.values, noun=lab.noun_idx.values, action=lab.action_idx.values)
     hits = {k: topk_hits(lg[k].astype(np.float32), labels[k], k=5) for k in n_cls}
 
-    res = dict(num_clips_total=len(clips), num_clips_evaluated=len(lg["clip_id"]), clean={}, official={})
+    res = dict(num_clips_total=len(clips), num_clips_evaluated=len(lg["clip_id"]), num_clips_skipped=len(skipped),
+               num_clips_failed_at_eval=len(failed), num_clips_out_of_range=len(expected_fail),
+               num_clips_missing=len(missing), clean={}, official={})
     for k in n_cls:
         res["clean"][k] = mean_class_recall(hits[k], labels[k], n_cls[k])
 
-    counts = official_eval_multiplicity(clips, args.world_size, args.batch_size, args.num_workers)
+    counts = official_eval_multiplicity(clips, args.world_size, args.batch_size, args.num_workers, skipped=skipped)
     w = np.array([counts.get(int(c), 0) for c in lg["clip_id"]], dtype=np.float64)
-    missing_weight = sum(v for c, v in counts.items() if c not in set(lg["clip_id"].tolist()))
+    evaluated = set(lg["clip_id"].tolist())
+    missing_weight = sum(v for c, v in counts.items() if c not in evaluated)
     for k in n_cls:
         res["official"][k] = mean_class_recall(hits[k], labels[k], n_cls[k], weights=w)
     res["official_protocol"] = dict(
@@ -78,7 +98,9 @@ def main():
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as f:
         json.dump(res, f, indent=2)
-    print(f"clips evaluated: {res['num_clips_evaluated']}/{res['num_clips_total']}")
+    print(f"clips evaluated: {res['num_clips_evaluated']}/{res['num_clips_total']}  "
+          f"(skipped {len(skipped)} undecodable: {len(failed)} failed at eval, {len(expected_fail)} predicted past video end; "
+          f"missing {len(missing)})")
     for proto in ("clean", "official"):
         r = res[proto]
         print(
