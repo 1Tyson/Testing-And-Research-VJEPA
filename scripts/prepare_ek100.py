@@ -34,6 +34,12 @@ def main():
     vdf = pd.read_csv(args.val_csv)
     verbs, nouns, actions, vdf_f = filter_annotations(tdf, vdf)
     videos = index_videos(args.video_root)
+    val_found = set(vdf_f["video_id"]) & set(videos)
+    if not val_found:
+        raise SystemExit(
+            f"No EK100 val video (e.g. P01_11.MP4) found under {args.video_root} "
+            f"({len(videos)} .MP4 files in total). Is the video dataset attached as an input?"
+        )
     clips = build_val_clips(vdf_f, verbs, nouns, actions, videos)
 
     val_videos = list(dict.fromkeys(vdf_f["video_id"].values))
