@@ -22,7 +22,8 @@ Nguồn: `evals/action_anticipation_frozen/` và `configs/inference/vitl/ek100.y
    quan sát **kết thúc tại `stop_frame − 1s`**, không phải `start_frame − 1s` như định nghĩa chuẩn của EK100.
    Với action dài hơn 1s, clip có thể chứa một phần của chính action cần dự đoán. Muốn tái tạo 32.7 thì phải giữ
    nguyên cách này (`--anchor official`). Chạy thêm `--anchor action_start` để đo con số theo giao thức chuẩn;
-   đây là một phân tích đáng đưa vào bài.
+   đây là một phân tích đáng đưa vào bài. Issue [facebookresearch/vjepa2#173](https://github.com/facebookresearch/vjepa2/issues/173)
+   (tháng 7/2026, chưa có phản hồi) cũng nêu đúng vấn đề này.
 3. **Cách đếm clip trong lúc validate.** Mỗi rank chạy đúng `ipe = N // (64×2)` batch và quay lại đầu khi hết dữ liệu.
    Vì mỗi rank giữ `videos[rank::64]` với số clip rất chênh lệch, có clip bị đếm nhiều lần và có clip không được
    đếm. `protocol.official_eval_multiplicity` mô phỏng lại việc này. Test so sánh với pipeline
@@ -42,3 +43,18 @@ Nguồn: `evals/action_anticipation_frozen/` và `configs/inference/vitl/ek100.y
 6. Clip decode lỗi bị code gốc bỏ qua âm thầm. Ở đây chúng được ghi vào `shard*/failed.json` (gộp qua các lần chạy).
 7. Trên Kaggle, DataLoader worker từng bị chết khi thoát (`pure virtual method called`, do decord). Cách xử lý:
    giải phóng VideoReader bằng `atexit` trong mỗi worker, và nếu vẫn crash thì lưu phần đã làm, thoát mã 3 rồi tự chạy lại.
+
+## Kết quả lần chạy đầu và các giả thuyết về khoảng lệch
+Official 28.61 và clean 27.09, so với 32.7 của paper (xem `results/verify_ek100_vitl.md`). Các giả thuyết và cách kiểm tra
+(chạy bằng `notebooks/kaggle_diagnose_ek100.ipynb`):
+
+| Giả thuyết | Kiểm tra |
+|---|---|
+| Con số official phụ thuộc vào số GPU và số worker của lần chạy gốc | `diagnose_ek100.py`: quét world size từ 1 đến 128 |
+| Nhiễu thống kê của mean-class recall (hàng nghìn class chỉ có 1–2 clip) | bootstrap, khoảng tin cậy 95% |
+| Lỗi trong pipeline tính metric | xáo trộn nhãn, kết quả phải về mức ngẫu nhiên |
+| Cách chấm điểm của code gốc (sigmoid bf16 + torch.topk) | mô phỏng lại trên logits đã lưu |
+| fp16 trên T4 so với bf16 của Meta | chạy fp32 trên 256 clip rồi so logits |
+| decord trả sai frame khi seek | `check_decoding.py`, so với PyAV |
+| 5 video có frame id không đúng fps gốc | tách riêng trong `diagnose_ek100.py` |
+| Probe/encoder đã phát hành không khớp với lần chạy trong paper (file `vitl.pt` có ngày 06/06/2025, probe có ngày 02/06/2025) | đối chứng bằng probe SSv2/Diving48 của cùng `vitl.pt` (cần thêm dataset) |
