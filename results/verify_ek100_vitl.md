@@ -1,5 +1,11 @@
 # Kiểm chứng V-JEPA 2 ViT-L/16 256px trên EK100 (probe `ek100-vitl-256.pt` của Meta)
 
+> **Cập nhật:** các số bên dưới được đo trên dataset `download-ek100`. Sau đó mới phát hiện đây là bản **đã encode lại**
+> (`ffmpeg scale=-2:256, crf 23`), không phải video gốc (1920x1080, khoảng 184 GB). Eval của V-JEPA 2 resize cạnh ngắn về 292
+> trước khi crop 256, nên ảnh 256p bị phóng to (mờ) và có nhiễu nén. Đây là nguyên nhân chính của khoảng lệch: một notebook
+> cũ chạy code gốc trên video gốc (tải từ Bristol, theo lô 15 video, 1 GPU, batch 4) ra **31.24**.
+> Cần chạy lại trên video gốc bằng `notebooks/kaggle_eval_ek100_original.ipynb`.
+
 Chạy trên Kaggle 2×T4, fp16, vjepa2 commit `204698b`, 9296 clip val (138 video gốc, khớp `EPIC_100_video_info.csv`).
 
 ## Kết quả chính (mean-class Recall@5)

@@ -77,6 +77,17 @@ def main():
     vals = list(res["official_by_world_size"].values())
     res["official_world_size_range"] = [min(vals), max(vals)]
 
+    # 1b. counting of the earlier "run official eval.py in lots of 15 videos on 1 GPU" notebook
+    #     (batch_size 4, 2 workers, TP/FN summed over lots), which reported 31.24
+    lots_counts = {}
+    vids = sorted(clips.video_id.unique())
+    for i in range(0, len(vids), 15):
+        sub = clips[clips.video_id.isin(vids[i : i + 15])]
+        for c, n in official_eval_multiplicity(sub, 1, 4, 2, skipped=skipped).items():
+            lots_counts[c] = lots_counts.get(c, 0) + n
+    w_lots = np.array([lots_counts.get(int(c), 0) for c in ids], dtype=np.float64)
+    res["lots_of_15_1gpu_bs4"] = mean_class_recall(hits, labels, n_act, weights=w_lots)["recall"]
+
     # 2. bootstrap over clips
     rng = np.random.default_rng(0)
     boots = []

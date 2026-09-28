@@ -2,6 +2,10 @@
 
 python scripts/prepare_ek100.py --video_root /kaggle/input/<ek100> \
     --train_csv EPIC_100_train.csv --val_csv EPIC_100_validation.csv --out_dir work/ek100
+
+With --download_layout the videos do not need to exist yet: paths are set to
+$video_root/P01/videos/P01_11.MP4 (where stream_eval_ek100.py downloads them) and the
+out-of-range check uses fps/duration from --video_info.
 """
 
 import argparse
@@ -27,13 +31,18 @@ def main():
     p.add_argument("--out_dir", required=True)
     p.add_argument("--probe_videos", action="store_true", help="read fps/resolution of every val video")
     p.add_argument("--video_info", default=None, help="EPIC_100_video_info.csv, to detect truncated/re-encoded files")
+    p.add_argument("--download_layout", action="store_true", help="videos will be downloaded later (see module doc)")
     args = p.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
 
     tdf = pd.read_csv(args.train_csv)
     vdf = pd.read_csv(args.val_csv)
     verbs, nouns, actions, vdf_f = filter_annotations(tdf, vdf)
-    videos = index_videos(args.video_root)
+    if args.download_layout:
+        videos = {v: os.path.join(os.path.abspath(args.video_root), v.split("_")[0], "videos", f"{v}.MP4")
+                  for v in dict.fromkeys(vdf_f["video_id"].values)}
+    else:
+        videos = index_videos(args.video_root)
     val_found = set(vdf_f["video_id"]) & set(videos)
     if not val_found:
         raise SystemExit(
@@ -65,28 +74,45 @@ def main():
     if missing:
         warnings.append(f"{len(missing)} val videos missing: metric is over a subset")
 
-    if args.probe_videos:
+    vi = pd.read_csv(args.video_info).set_index("video_id") if args.video_info else None
+    meta = None
+    if args.probe_videos and not args.download_layout:
         from decord import VideoReader, cpu
 
         meta = {}
         for vid in clips["video_id"].unique():
             vr = VideoReader(videos[vid], ctx=cpu(0))
             h, w = vr[0].shape[:2]
-            meta[vid] = dict(fps=vr.get_avg_fps(), frames=len(vr), h=h, w=w)
+            mbps = os.path.getsize(videos[vid]) * 8 / 1e6 / (len(vr) / vr.get_avg_fps())
+            meta[vid] = dict(fps=vr.get_avg_fps(), frames=len(vr), h=h, w=w, mbps=round(mbps, 2))
         report["video_meta"] = meta
+        report["resolution_histogram"] = dict(Counter(f"{m['w']}x{m['h']}" for m in meta.values()))
+        report["median_bitrate_mbps"] = float(pd.Series([m["mbps"] for m in meta.values()]).median())
+        # The original GoPro files are ~1080p at well over 10 Mbit/s. A mirror squeezed into a
+        # Kaggle notebook output (20GB) must be re-encoded, which measurably lowers the score.
+        if report["median_bitrate_mbps"] < 8:
+            warnings.append(f"median bitrate {report['median_bitrate_mbps']:.1f} Mbit/s: videos look re-encoded, "
+                            "not the original EK100 files (use stream_eval_ek100.py to fetch the originals)")
 
-        if args.video_info:
-            vi = pd.read_csv(args.video_info).set_index("video_id")
+        if vi is not None:
             mismatch = {}
             for vid, m in meta.items():
                 ref_fps, ref_dur = vi.loc[vid, "fps"], vi.loc[vid, "duration"]
+                ref_res = str(vi.loc[vid, "resolution"])
                 dur = m["frames"] / m["fps"]
-                if abs(m["fps"] - ref_fps) > 0.05 or abs(dur - ref_dur) > 1.0:
+                if abs(m["fps"] - ref_fps) > 0.05 or abs(dur - ref_dur) > 1.0 or f"{m['w']}x{m['h']}" != ref_res:
                     mismatch[vid] = dict(fps=round(m["fps"], 2), ref_fps=round(ref_fps, 2), duration=round(dur, 1),
-                                         ref_duration=round(ref_dur, 1))
+                                         ref_duration=round(ref_dur, 1), resolution=f"{m['w']}x{m['h']}",
+                                         ref_resolution=ref_res)
             report["mismatch_vs_official_video_info"] = mismatch
             if mismatch:
-                warnings.append(f"{len(mismatch)} videos differ from EPIC_100_video_info.csv (truncated/re-encoded?)")
+                warnings.append(f"{len(mismatch)} videos differ from EPIC_100_video_info.csv (resolution/fps/duration)")
+    elif vi is not None:
+        # videos not read: take fps and length from the official video info
+        meta = {vid: dict(fps=float(vi.loc[vid, "fps"]), frames=int(vi.loc[vid, "duration"] * vi.loc[vid, "fps"]))
+                for vid in clips["video_id"].unique()}
+
+    if meta is not None:
         # EK100 frame ids are at ~60fps for every video, but the official loader indexes the raw
         # video with them, so on 30/48/90fps videos the clip lands at the wrong time (or past the end).
         report["videos_where_frame_ids_are_not_native"] = {

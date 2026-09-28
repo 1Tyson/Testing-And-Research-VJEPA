@@ -6,7 +6,13 @@ Kiểm chứng và nghiên cứu cải tiến **V-JEPA 2** cho bài toán action
 - Mục tiêu 2: cải tiến phần phía trên encoder đã pretrain. Xem [docs/PLAN.md](docs/PLAN.md).
 - Chi tiết giao thức và những điểm dễ gây lệch: [docs/protocol_notes.md](docs/protocol_notes.md).
 
-## Chạy nhanh trên Kaggle
+## Chạy trên Kaggle
+**Dùng [notebooks/kaggle_eval_ek100_original.ipynb](notebooks/kaggle_eval_ek100_original.ipynb)**: notebook này tải
+**video gốc** EK100 từ Bristol, eval ngay trên 2×T4, rồi xóa (không cần dataset video, có resume qua nhiều phiên).
+Không dùng bản video đã encode lại (ví dụ 256p crf 23): nó làm điểm tụt vài điểm, xem `results/verify_ek100_vitl.md`.
+Nếu cần kiểm tra một dataset video có phải bản gốc không, chạy `notebooks/kaggle_check_dataset.ipynb`.
+
+### Notebook cũ (dùng với dataset video có sẵn)
 Mở [notebooks/kaggle_verify_ek100.ipynb](notebooks/kaggle_verify_ek100.ipynb) (GPU T4 x2, Internet On).
 Notebook `git clone` repo này, nên repo phải để **public**, hoặc upload repo lên Kaggle dưới dạng dataset.
 
@@ -33,7 +39,7 @@ src/vjepa_ek100/protocol.py         # class mapping, danh sách clip, frame inde
 src/vjepa_ek100/metrics.py          # mean-class recall@k (khớp ClassMeanRecall gốc)
 src/vjepa_ek100/data.py             # dataset map-style, decode giống code gốc
 src/vjepa_ek100/model.py            # load encoder + predictor + probe từ code gốc
-scripts/                            # prepare / eval / compute_metrics
+scripts/                            # prepare / eval / compute_metrics / diagnose / stream_eval (tải video gốc + eval)
 tests/                              # so sánh với code gốc (cần VJEPA2_ROOT)
 ```
 
