@@ -78,11 +78,27 @@ class ShardWriter:
         if sum(len(c) for c in self.buf["clip_id"]) >= self.save_every:
             self.flush()
 
-    def add_failed(self, ids):
-        if ids:
-            self.failed |= set(int(c) for c in ids)
+    def _update_json(self, name, new):
+        path = os.path.join(self.dir, name)
+        old = {}
+        if os.path.exists(path):
+            with open(path) as f:
+                old = json.load(f)
+        old.update({str(k): v for k, v in new.items()})
+        with open(path, "w") as f:
+            json.dump(old, f, indent=1)
+
+    def add_failed(self, reasons):
+        """reasons: {clip_id: error message}"""
+        if reasons:
+            self.failed |= set(int(c) for c in reasons)
             with open(os.path.join(self.dir, "failed.json"), "w") as f:
                 json.dump(sorted(self.failed), f)
+            self._update_json("failed_reasons.json", reasons)
+
+    def add_pyav(self, ids):
+        if ids:
+            self._update_json("decoded_with_pyav.json", {int(c): True for c in ids})
 
     def flush(self):
         if not self.buf["clip_id"]:
@@ -106,6 +122,7 @@ def evaluate(todo, anchor, writer, model, probe, data_cfg, args, device, dtype, 
         fps=data_cfg["frames_per_second"],
         anticipation_time=at,
         anchor=anchor,
+        decode_fallback=args.decode_fallback,
     )
     loader = torch.utils.data.DataLoader(
         ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate, pin_memory=True,
@@ -116,6 +133,7 @@ def evaluate(todo, anchor, writer, model, probe, data_cfg, args, device, dtype, 
         with torch.inference_mode():
             for batch in loader:
                 writer.add_failed(batch["failed"])
+                writer.add_pyav(batch["pyav"])
                 if batch["video"] is None:
                     continue
                 x = batch["video"].to(device, non_blocking=True)
@@ -166,6 +184,8 @@ def main():
     p.add_argument("--only_videos", default=None, help="file with one video_id per line: evaluate only these")
     p.add_argument("--watch_dir", default=None, help="streaming mode, see module doc")
     p.add_argument("--delete_after", action="store_true", help="watch mode: delete each video once evaluated")
+    p.add_argument("--decode_fallback", choices=["none", "pyav"], default="none",
+                   help="pyav: decode with PyAV the in-range clips decord fails on (the official loader drops them)")
     p.add_argument("--save_feats_pool", type=int, default=0, help="also save features pooled to PxP per time step")
     args = p.parse_args()
 

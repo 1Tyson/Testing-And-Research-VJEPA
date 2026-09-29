@@ -47,6 +47,22 @@ def done_clip_ids(anchor_dir):
     return done
 
 
+def reopen_failed(anchor_dir, keep, log):
+    """Remove failed clips (except `keep`, e.g. windows past the video end) from failed.json so they are evaluated again."""
+    reopened = []
+    for f in glob.glob(os.path.join(anchor_dir, "shard*", "failed.json")):
+        with open(f) as fh:
+            failed = set(json.load(fh))
+        retry = failed - keep
+        if retry:
+            with open(f, "w") as fh:
+                json.dump(sorted(failed & keep), fh)
+            reopened += sorted(retry)
+    if reopened:
+        log(f"[retry_failed] {os.path.basename(anchor_dir)}: re-evaluating clips {reopened}")
+    return reopened
+
+
 def check_video(path, ref):
     """The file must decode and match the official fps / duration / resolution."""
     try:
@@ -112,6 +128,9 @@ def main():
     p.add_argument("--tries", type=int, default=3)
     p.add_argument("--max_hours", type=float, default=10.5, help="stop starting new downloads after this")
     p.add_argument("--copy_from", default=None, help="take videos from a local folder instead of downloading")
+    p.add_argument("--retry_failed", action="store_true",
+                   help="re-download and re-evaluate clips that failed to decode (not the windows past the video end)")
+    p.add_argument("--decode_fallback", choices=["none", "pyav"], default="none", help="see eval_ek100.py")
     p.add_argument("--eval_args", default="", help="extra args for eval_ek100.py")
     args = p.parse_args()
 
@@ -130,6 +149,11 @@ def main():
     clips = pd.read_csv(os.path.join(args.work_dir, "val_clips.csv"))
     vi = pd.read_csv(args.video_info).set_index("video_id")
     videos = clips.sort_values("video_order").drop_duplicates("video_id")
+    if args.retry_failed:
+        for a in args.anchors:
+            col = f"expected_fail_{a}"
+            keep = set(clips.clip_id[clips[col]].tolist()) if col in clips else set()
+            reopen_failed(os.path.join(args.out_dir, a), keep, log)
     done = {a: done_clip_ids(os.path.join(args.out_dir, a)) for a in args.anchors}
     todo_videos = [
         r for r in videos.itertuples()
@@ -151,7 +175,7 @@ def main():
         run = (f"{sys.executable} {here}/eval_ek100.py --work_dir {args.work_dir} --out_dir {args.out_dir} "
                f"--vitl_ckpt {args.vitl_ckpt} --probe_ckpt {args.probe_ckpt} --device {device} "
                f"--shard_id {i} --num_shards {len(args.gpus)} --dtype {args.dtype} --num_workers {args.num_workers} "
-               f"--anchors {' '.join(args.anchors)} --watch_dir {watch} --delete_after {args.eval_args}")
+               f"--anchors {' '.join(args.anchors)} --watch_dir {watch} --delete_after --decode_fallback {args.decode_fallback} {args.eval_args}")
         cmd = f"for t in 1 2 3 4 5; do {run} && break; echo '[eval restart '$t']'; done"
         log_f = open(os.path.join(args.out_dir, f"eval_gpu{g}.log"), "a")
         procs.append(subprocess.Popen(["bash", "-c", cmd], stdout=log_f, stderr=subprocess.STDOUT))

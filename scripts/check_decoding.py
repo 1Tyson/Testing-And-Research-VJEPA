@@ -17,25 +17,8 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+from vjepa_ek100.data import pyav_frames  # noqa: E402
 from vjepa_ek100.protocol import clip_frame_indices  # noqa: E402
-
-
-def pyav_frames(path, indices, fps):
-    """Frames at `indices` (presentation order, constant frame rate), seeking by timestamp."""
-    import av
-
-    wanted = {int(i): None for i in indices}
-    with av.open(path) as c:
-        s = c.streams.video[0]
-        start_t = max(min(wanted) / fps - 2.0, 0.0)
-        c.seek(int(start_t / s.time_base), stream=s, backward=True, any_frame=False)
-        for fr in c.decode(s):
-            idx = int(round(float(fr.pts * s.time_base) * fps))
-            if idx in wanted:
-                wanted[idx] = fr.to_ndarray(format="rgb24")
-            if idx >= max(wanted):
-                break
-    return np.stack([wanted[int(i)] for i in indices])
 
 
 def main():
