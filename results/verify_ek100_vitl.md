@@ -8,7 +8,22 @@
 
 Chạy trên Kaggle 2×T4, fp16, vjepa2 commit `204698b`, 9296 clip val (138 video gốc, khớp `EPIC_100_video_info.csv`).
 
-## Kết quả chính (mean-class Recall@5)
+## Video gốc: lần chạy 1 (CHƯA ĐỦ, 120/138 video, 7669/9296 clip)
+`notebooks/kaggle_eval_ek100_original.ipynb`, 2×T4 fp16, 10.8 giờ (phần lớn thời gian là tải video).
+
+| Giao thức | Cách đếm | Action | Verb | Noun |
+|---|---|---|---|---|
+| Code gốc (`official` anchor) | official (64 GPU) | **33.56** | 58.91 | 54.46 |
+| Code gốc (`official` anchor) | clean | 33.25 | 56.12 | 54.43 |
+| Code gốc (`official` anchor) | theo lô 15 video, 1 GPU, batch 4 | 33.24 | | |
+| Chuẩn EK100 (`action_start`) | official | 13.49 | 29.27 | 34.97 |
+| Chuẩn EK100 (`action_start`) | clean | 15.69 | 30.85 | 38.51 |
+
+Official dao động 33.06–33.86 khi đổi world size; bootstrap std 0.65. **Đây mới là con số tạm thời:** mean-class recall
+trên một tập con không so trực tiếp được với con số trên toàn bộ tập val (notebook cũ theo lô: 33.43 sau 8/10 lô, 31.24 khi đủ).
+Còn 18 video (P29–P32), cần chạy thêm 1 phiên.
+
+## Dataset `download-ek100` (bản encode lại 256p crf 23): kết quả chính (mean-class Recall@5)
 | Giao thức | Cách đếm | Action | Verb | Noun |
 |---|---|---|---|---|
 | Code gốc (clip kết thúc tại `stop_frame − 1s`) | official (mô phỏng 64 GPU) | **28.61** | 55.23 | 46.79 |

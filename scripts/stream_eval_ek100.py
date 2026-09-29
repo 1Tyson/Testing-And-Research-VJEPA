@@ -79,7 +79,7 @@ def fetch(video_id, dest, ref, args, log):
                         os.remove(p)
                 cmd = ["aria2c", "-x", str(args.connections), "-s", str(args.connections), "-k", "5M", "-c",
                        "--check-certificate=false", "--connect-timeout=30", "--timeout=120", "--max-tries=3",
-                       "--retry-wait=10", "--user-agent=Mozilla/5.0", "--allow-overwrite=true",
+                       "--retry-wait=10", "--lowest-speed-limit=200K", "--user-agent=Mozilla/5.0", "--allow-overwrite=true",
                        "--console-log-level=error", "--summary-interval=0",
                        "-d", os.path.dirname(dest), "-o", os.path.basename(dest), url]
                 if subprocess.run(cmd, capture_output=True).returncode == 0:
