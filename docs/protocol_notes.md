@@ -58,3 +58,7 @@ Official 28.61 và clean 27.09, so với 32.7 của paper (xem `results/verify_e
 | decord trả sai frame khi seek | `check_decoding.py`, so với PyAV |
 | 5 video có frame id không đúng fps gốc | tách riêng trong `diagnose_ek100.py` |
 | Probe/encoder đã phát hành không khớp với lần chạy trong paper (file `vitl.pt` có ngày 06/06/2025, probe có ngày 02/06/2025) | đối chứng bằng probe SSv2/Diving48 của cùng `vitl.pt` (cần thêm dataset) |
+
+## Kết luận (sau khi chạy trên video gốc)
+Nguyên nhân chính của khoảng lệch 28.6 so với 32.7 là **dữ liệu video đã bị encode lại**. Trên video gốc, official =
+**32.71** (paper 32.7) và clean = 31.23. Xem `results/verify_ek100_vitl.md`.

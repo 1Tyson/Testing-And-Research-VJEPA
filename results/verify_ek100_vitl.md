@@ -1,5 +1,35 @@
 # Kiểm chứng V-JEPA 2 ViT-L/16 256px trên EK100 (probe `ek100-vitl-256.pt` của Meta)
 
+## ✅ KẾT QUẢ CUỐI: đã tái tạo được 32.7 (video gốc, đủ 138/138 video)
+`notebooks/kaggle_eval_ek100_original.ipynb`, Kaggle 2×T4, fp16, vjepa2 `204698b`. Chạy 2 phiên: 10.8 giờ + 2.5 giờ,
+phần lớn thời gian là tải 184 GB video gốc từ data.bris.ac.uk.
+
+| Giao thức | Cách đếm | Action R@5 | Verb R@5 | Noun R@5 |
+|---|---|---|---|---|
+| Code gốc (`official` anchor) | **official** (mô phỏng 64 GPU của Meta) | **32.71** | 58.99 | 53.82 |
+| Code gốc (`official` anchor) | clean (mỗi clip 1 lần) | 31.23 | 53.58 | 52.76 |
+| Code gốc (`official` anchor) | theo lô 15 video, 1 GPU, batch 4 (như notebook cũ: 31.24) | 31.22 | | |
+| Chuẩn EK100 (`action_start`) | official | 13.22 | 29.01 | 34.54 |
+| Chuẩn EK100 (`action_start`) | clean | 14.63 | 28.42 | 36.86 |
+| **Paper / README** | | **32.7** | | |
+
+- 9248/9296 clip được eval; 48 clip không decode được và bị bỏ qua (36 dự đoán trước do cửa sổ vượt cuối video,
+  12 lỗi decode khác), giống hành vi của code gốc.
+- Official dao động 31.22–32.72 khi đổi world size (1 đến 128 GPU); bootstrap std của clean là 0.66.
+- Con số 32.7 của paper **khớp chính xác** với cách đếm của lần chạy inference 64 GPU. Nếu mỗi clip chỉ đếm 1 lần
+  thì con số đúng là **31.2**, thấp hơn khoảng 1.5 điểm.
+- Với giao thức anticipation chuẩn (clip dừng 1s trước khi action bắt đầu), cùng model chỉ đạt **14.6**.
+
+## Tóm tắt các lần chạy
+| Dữ liệu | Official | Clean |
+|---|---|---|
+| Dataset `download-ek100` (encode lại 256p crf 23) | 28.61 | 27.09 |
+| Video gốc | **32.71** | 31.23 |
+
+
+---
+# Lịch sử chẩn đoán
+
 > **Cập nhật:** các số bên dưới được đo trên dataset `download-ek100`. Sau đó mới phát hiện đây là bản **đã encode lại**
 > (`ffmpeg scale=-2:256, crf 23`), không phải video gốc (1920x1080, khoảng 184 GB). Eval của V-JEPA 2 resize cạnh ngắn về 292
 > trước khi crop 256, nên ảnh 256p bị phóng to (mờ) và có nhiễu nén. Đây là nguyên nhân chính của khoảng lệch: một notebook
