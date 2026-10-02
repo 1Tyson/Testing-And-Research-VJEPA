@@ -69,12 +69,14 @@ class ShardWriter:
     def done(self):
         return done_clip_ids(self.dir) | self.failed
 
-    def add(self, clip_id, out, feats=None):
+    def add(self, clip_id, out, feats=None, extra=None):
         self.buf["clip_id"].append(clip_id)
         for k in ("verb", "noun", "action"):
             self.buf[k].append(out[k].float().cpu().numpy().astype(np.float16))
         if feats is not None:
             self.buf["feats"].append(feats)
+        for k, v in (extra or {}).items():
+            self.buf.setdefault(k, []).append(v)
         if sum(len(c) for c in self.buf["clip_id"]) >= self.save_every:
             self.flush()
 
@@ -111,10 +113,57 @@ class ShardWriter:
             v.clear()
 
 
-def evaluate(todo, anchor, writer, model, probe, data_cfg, args, device, dtype, stats):
-    """Evaluate the clips in `todo`; returns an error string if the DataLoader died, else None."""
+ORACLE_VARIANTS = ("oracle", "enconly", "copylast")
+
+
+def predict_future(model, x, ats):
+    """The predictor call of AnticipativeWrapper (single step), on precomputed encoder tokens."""
+    assert model.num_steps == 1 and not model.no_predictor
+    B, N, _ = x.shape
+    ctxt = torch.arange(N, device=x.device).unsqueeze(0).repeat(B, 1)
+    steps = (ats * model.frames_per_second / model.tubelet_size).to(torch.int64)
+    n_pred = int(model.grid_size**2 * (model.num_output_frames // model.tubelet_size))
+    tgt = torch.arange(n_pred, device=x.device).unsqueeze(0).repeat(B, 1) + (N + model.grid_size**2 * steps)[:, None]
+    out = model.predictor(x, masks_x=ctxt, masks_y=tgt)
+    return out[0] if isinstance(out, tuple) else out
+
+
+def oracle_forward(model, probe, x, xf, ats):
+    """Probe outputs for the predictor's future tokens and for stand-ins, plus how well it predicts.
+
+    oracle:   real encoder tokens of the predicted time step (from the clip shifted into the future)
+    enconly:  no future tokens at all
+    copylast: last observed time step repeated (a "nothing changes" forecast)
+    """
+    x_ctx = model.encoder(x)
+    pred = predict_future(model, x_ctx, ats)
+    n = pred.shape[1]
+    real = model.encoder(xf)[:, -n:]
+    last = x_ctx[:, -n:]
+    outs = dict(
+        base=probe(torch.cat([x_ctx, pred], 1)),
+        oracle=probe(torch.cat([x_ctx, real], 1)),
+        enconly=probe(x_ctx),
+        copylast=probe(torch.cat([x_ctx, last], 1)),
+    )
+    cos = dict(
+        cos_pred=F.cosine_similarity(pred.float(), real.float(), dim=-1).mean(1),
+        cos_copylast=F.cosine_similarity(last.float(), real.float(), dim=-1).mean(1),
+    )
+    return outs, {k: v.cpu().numpy() for k, v in cos.items()}
+
+
+def evaluate(todo, anchor, writers, model, probe, data_cfg, args, device, dtype, stats):
+    """Evaluate the clips in `todo`; returns an error string if the DataLoader died, else None.
+
+    writers: {"base": ShardWriter} or, with --oracle, also one per ORACLE_VARIANTS.
+    """
     at = float(data_cfg["anticipation_time_sec"][0])
     grid = data_cfg["resolution"] // 16
+    writer = writers["base"]
+    shift_slots = 0
+    if args.oracle:  # the predicted step lies (steps + 1) tubelets after the last observed one
+        shift_slots = model.tubelet_size * (int(at * model.frames_per_second / model.tubelet_size) + 1)
     ds = EK100ClipDataset(
         todo,
         eval_transform(data_cfg["resolution"]),
@@ -123,6 +172,8 @@ def evaluate(todo, anchor, writer, model, probe, data_cfg, args, device, dtype, 
         anticipation_time=at,
         anchor=anchor,
         decode_fallback=args.decode_fallback,
+        fix_frame_ids=args.fix_frame_ids,
+        future_shift_slots=shift_slots,
     )
     loader = torch.utils.data.DataLoader(
         ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate, pin_memory=True,
@@ -132,23 +183,32 @@ def evaluate(todo, anchor, writer, model, probe, data_cfg, args, device, dtype, 
     try:
         with torch.inference_mode():
             for batch in loader:
-                writer.add_failed(batch["failed"])
+                for w in writers.values():
+                    w.add_failed(batch["failed"])
                 writer.add_pyav(batch["pyav"])
                 if batch["video"] is None:
                     continue
                 x = batch["video"].to(device, non_blocking=True)
                 ats = torch.full((x.shape[0],), at, device=device)
-                with torch.autocast(device.type, dtype=dtype, enabled=dtype != torch.float32):
-                    feats = model(x, ats)
-                    if not torch.isfinite(feats).all():  # fp16 overflow: redo this batch in fp32
-                        stats["fp32_retries"] += 1
-                        with torch.autocast(device.type, enabled=False):
-                            feats = model(x.float(), ats)
-                    out = probe(feats)
-                pooled = None
-                if args.save_feats_pool:
-                    pooled = pool_tokens(feats, grid, args.save_feats_pool).cpu().numpy().astype(np.float16)
-                writer.add(batch["clip_id"].numpy(), out, pooled)
+                if args.oracle:
+                    with torch.autocast(device.type, dtype=dtype, enabled=dtype != torch.float32):
+                        outs, cos = oracle_forward(model, probe, x, batch["future"].to(device), ats)
+                    ids = batch["clip_id"].numpy()
+                    writer.add(ids, outs["base"], extra=cos)
+                    for v in ORACLE_VARIANTS:
+                        writers[v].add(ids, outs[v])
+                else:
+                    with torch.autocast(device.type, dtype=dtype, enabled=dtype != torch.float32):
+                        feats = model(x, ats)
+                        if not torch.isfinite(feats).all():  # fp16 overflow: redo this batch in fp32
+                            stats["fp32_retries"] += 1
+                            with torch.autocast(device.type, enabled=False):
+                                feats = model(x.float(), ats)
+                        out = probe(feats)
+                    pooled = None
+                    if args.save_feats_pool:
+                        pooled = pool_tokens(feats, grid, args.save_feats_pool).cpu().numpy().astype(np.float16)
+                    writer.add(batch["clip_id"].numpy(), out, pooled)
                 seen += x.shape[0]
                 if seen % args.save_every < x.shape[0]:
                     rate = seen / (time.time() - t0)
@@ -158,7 +218,8 @@ def evaluate(todo, anchor, writer, model, probe, data_cfg, args, device, dtype, 
         print(f"[error] {e!r}", flush=True)
         return repr(e)
     finally:
-        writer.flush()
+        for w in writers.values():
+            w.flush()
         stats["clips"] += seen
     return None
 
@@ -184,6 +245,11 @@ def main():
     p.add_argument("--only_videos", default=None, help="file with one video_id per line: evaluate only these")
     p.add_argument("--watch_dir", default=None, help="streaming mode, see module doc")
     p.add_argument("--delete_after", action="store_true", help="watch mode: delete each video once evaluated")
+    p.add_argument("--oracle", action="store_true",
+                   help="also score the probe with the real future tokens / no future / last step repeated "
+                        "(written to <anchor>__oracle etc.) and save predictor-vs-real cosine similarity")
+    p.add_argument("--fix_frame_ids", action="store_true",
+                   help="convert annotation frame ids to native fps (29.97/47.95/90 fps videos); not in official code")
     p.add_argument("--decode_fallback", choices=["none", "pyav"], default="none",
                    help="pyav: decode with PyAV the in-range clips decord fails on (the official loader drops them)")
     p.add_argument("--save_feats_pool", type=int, default=0, help="also save features pooled to PxP per time step")
@@ -203,11 +269,16 @@ def main():
         with open(args.only_videos) as f:
             clips = clips[clips.video_id.isin(f.read().split())]
     clips = clips[clips.video_order % args.num_shards == args.shard_id]
-    writers = {a: ShardWriter(os.path.join(args.out_dir, a, f"shard{args.shard_id}"), args.save_every) for a in args.anchors}
+    variants = ("base",) + (ORACLE_VARIANTS if args.oracle else ())
+    writers = {
+        a: {v: ShardWriter(os.path.join(args.out_dir, a if v == "base" else f"{a}__{v}", f"shard{args.shard_id}"),
+                           args.save_every) for v in variants}
+        for a in args.anchors
+    }
 
     def todo_for(anchor, video_ids=None):
         c = clips if video_ids is None else clips[clips.video_id.isin(video_ids)]
-        return c[~c.clip_id.isin(writers[anchor].done())]
+        return c[~c.clip_id.isin(writers[anchor]["base"].done())]
 
     remaining = {a: len(todo_for(a)) for a in args.anchors}
     print(f"shard {args.shard_id}/{args.num_shards}: {len(clips)} clips; to go {remaining}", flush=True)
@@ -261,9 +332,10 @@ def main():
     remaining = {a: len(todo_for(a)) for a in args.anchors}
     el = time.time() - t0
     stats.update(seconds=el, clips_per_sec=stats["clips"] / max(el, 1e-6), remaining_in_shard=remaining,
-                 failed={a: sorted(w.failed) for a, w in writers.items()}, crash=crash, dtype=args.dtype,
+                 failed={a: sorted(w["base"].failed) for a, w in writers.items()}, crash=crash, dtype=args.dtype,
                  device=torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu")
-    for w in writers.values():
+    for wa in writers.values():
+        w = wa["base"]
         with open(os.path.join(w.dir, f"run_{int(time.time())}.json"), "w") as f:
             json.dump(stats, f, indent=2)
     print(json.dumps({k: v for k, v in stats.items() if k != "failed"}, indent=2))

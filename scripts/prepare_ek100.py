@@ -90,7 +90,11 @@ def main():
         report["median_bitrate_mbps"] = float(pd.Series([m["mbps"] for m in meta.values()]).median())
         # The original GoPro files are ~1080p at well over 10 Mbit/s. A mirror squeezed into a
         # Kaggle notebook output (20GB) must be re-encoded, which measurably lowers the score.
-        if report["median_bitrate_mbps"] < 8:
+        short = min(min(m["h"], m["w"]) for m in meta.values())
+        if short < 292:
+            warnings.append(f"smallest short side {short}px < 292px: frames get upscaled by the eval, scores drop "
+                            "(use the originals via stream_eval_ek100.py, or reencode_ek100.py at 292)")
+        elif short > 292 and report["median_bitrate_mbps"] < 8:
             warnings.append(f"median bitrate {report['median_bitrate_mbps']:.1f} Mbit/s: videos look re-encoded, "
                             "not the original EK100 files (use stream_eval_ek100.py to fetch the originals)")
 

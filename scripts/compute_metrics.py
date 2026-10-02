@@ -43,14 +43,20 @@ def main():
     p.add_argument("--batch_size", type=int, default=2)
     p.add_argument("--num_workers", type=int, default=2)
     p.add_argument("--allow_partial", action="store_true", help="report even if some clips were not evaluated yet")
+    p.add_argument("--only_videos", default=None, help="file with video_ids: score only clips of these videos")
     args = p.parse_args()
 
     clips = pd.read_csv(os.path.join(args.work_dir, "val_clips.csv"))
+    if args.only_videos:
+        with open(args.only_videos) as f:
+            clips = clips[clips.video_id.isin(f.read().split())]
     with open(os.path.join(args.work_dir, "classes.json")) as f:
         classes = json.load(f)
     n_cls = dict(verb=len(classes["verbs"]), noun=len(classes["nouns"]), action=len(classes["actions"]))
 
     lg = load_logits(args.logits_dir)
+    in_scope = np.isin(lg["clip_id"], clips.clip_id.values)
+    lg = {k: v[in_scope] for k, v in lg.items()}
 
     # Clips that cannot be decoded (errors seen at eval time, or windows past the video end).
     # The official loader drops these silently; they are excluded from both metrics.
@@ -58,7 +64,7 @@ def main():
     for f in glob.glob(os.path.join(args.logits_dir, "shard*", "failed.json")):
         with open(f) as fh:
             failed.update(json.load(fh))
-    anchor = os.path.basename(os.path.normpath(args.logits_dir))
+    anchor = os.path.basename(os.path.normpath(args.logits_dir)).split("__")[0]  # e.g. action_start__oracle
     col = f"expected_fail_{anchor}"
     expected_fail = set(clips.clip_id[clips[col]].tolist()) if col in clips else set()
     skipped = failed | expected_fail

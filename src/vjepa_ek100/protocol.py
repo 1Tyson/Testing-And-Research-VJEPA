@@ -93,6 +93,8 @@ def clip_frame_indices(
     anticipation_time=1.0,
     anticipation_point=0.0,
     anchor="official",
+    fix_frame_ids=False,
+    shift_frames=0,
 ):
     """Frame indices of the observed clip.
 
@@ -102,7 +104,12 @@ def clip_frame_indices(
       overlap the action itself for actions longer than 1s.
     anchor="action_start": the standard EK100 anticipation definition (observation ends
       tau_a = `anticipation_time` seconds before the action starts), af = sf - at * vfps.
+    fix_frame_ids: convert the annotation frame ids (always ~60fps) to the video's native fps
+      first (matters for the 29.97 / 47.95 / 90 fps videos; the official code does not do this).
+    shift_frames: move the whole window later by this many frames (used for "oracle" future clips).
     """
+    if fix_frame_ids:
+        start_frame, stop_frame = native_frame_id(start_frame, vfps), native_frame_id(stop_frame, vfps)
     fstp = int(vfps / fps)
     nframes = int(frames_per_clip * fstp)
     aframes = int(anticipation_time * vfps)
@@ -112,9 +119,21 @@ def clip_frame_indices(
         af = int(start_frame - aframes)
     else:
         raise ValueError(f"unknown anchor {anchor}")
+    af += shift_frames
     indices = np.arange(af - nframes, af, fstp).astype(np.int64)
     indices[indices < 0] = 0
     return indices
+
+
+def native_frame_id(frame, vfps):
+    """Map an EK100 annotation frame id to the video's own frame index.
+
+    Checked on all train+val videos (stop_frame / stop_timestamp): EK55 videos are annotated at
+    ~60fps whatever their real fps (29.97 / 47.95 / 59.94 / 90), the 50fps extension videos at 50.
+    """
+    if min(abs(vfps - 50.0), abs(vfps - 59.94), abs(vfps - 60.0)) < 0.1:
+        return int(frame)
+    return int(round(frame * vfps / 60.0))
 
 
 def official_eval_multiplicity(clips, world_size=64, batch_size=2, num_workers=2, skipped=()):

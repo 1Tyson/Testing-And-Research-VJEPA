@@ -103,3 +103,28 @@ Nguyên tắc thí nghiệm:
 - Val gốc chạy trên 64 GPU nên đếm clip không đều. Ta báo cáo cả số "official" (mô phỏng lại cách đếm này) và số "clean".
 - Khi chạy eval, bật `--save_feats_pool 4` để có sẵn feature cho Giai đoạn 2–3 mà không phải chạy encoder lại.
 - Công trình liên quan cần đọc: JFAA (giải nhất EK100 Action Anticipation Challenge EgoVis 2026, dựa trên V-JEPA 2).
+
+---
+## Giai đoạn nghiên cứu: pretrain lại predictor cho bài toán dự đoán tương lai (đã chốt hướng)
+**Giả thuyết.** Predictor của V-JEPA 2 (cỡ ViT-S, 22M tham số) được pretrain để điền vào chỗ bị che (mask ngẫu nhiên),
+chưa từng được train để dự đoán tương lai. Kết luận "predictor gần như không giúp gì" (Table 20 của paper: 39.1 → 39.7)
+được đo theo giao thức gốc, trong đó clip đã nhìn thấy một phần action. Theo giao thức chuẩn, cùng model rơi từ 31.2 xuống
+14.6, và đây đúng là chỗ cần khả năng dự báo.
+
+**Bước 0: đo khoảng còn có thể cải thiện** (`notebooks/kaggle_predictor_oracle.ipynb`, `eval_ek100.py --oracle`,
+`scripts/summarize_oracle.py`). Dùng probe của Meta, chấm với token tương lai thật (oracle), không có token tương lai
+(enconly), và lặp lại bước cuối (copylast). Đo thêm cosine giữa token dự đoán và token thật. Lấy 43 video val dày clip nhất
+(khoảng 50% số clip).
+
+**Bước 1: tạo bản sao video ở đúng độ phân giải của eval** (`notebooks/kaggle_reencode_ek100.ipynb`,
+`scripts/reencode_ek100.py`, chỉ dùng CPU). Resize giống hệt eval (cv2 INTER_LINEAR, cạnh ngắn 292), pad 519 lên 520,
+x264 yuv444p crf 12, giữ nguyên mọi frame và fps. Video val nén xong dùng để kiểm tra lại: logits phải khớp với lần chạy
+trên video gốc.
+
+**Bước 2: pretrain predictor** với encoder giữ nguyên. Từ 4s quá khứ, dự đoán token encoder ở +0.5/+1/+2s. Loss L1 trong
+latent, khởi tạo từ predictor V-JEPA 2 hoặc train từ đầu.
+
+**Bước 3: so sánh bằng probe train lại theo giao thức chuẩn:** chỉ encoder, encoder + predictor gốc, encoder + predictor mới.
+
+**Lưu ý về frame id** (đã kiểm tra trên toàn bộ train + val): video EK55 được đánh frame id theo khoảng 60fps bất kể fps thật,
+còn video bản mở rộng 50fps đánh theo đúng 50fps. `--fix_frame_ids` chuyển frame id về fps gốc của từng video.

@@ -108,3 +108,15 @@ def test_multiplicity_matches_official_loop(vjepa2_root, tmp_path, world_size, b
     counts = official_eval_multiplicity(clips, world_size, batch_size, num_workers, skipped=skipped)
     ours = Counter({key[c]: n for c, n in counts.items()})
     assert ours == seen
+
+
+def test_native_frame_ids():
+    from vjepa_ek100.protocol import native_frame_id
+
+    assert native_frame_id(3071, 29.97) == round(3071 * 29.97 / 60)  # P09_07: annotated at 60fps
+    assert native_frame_id(1000, 59.94) == 1000
+    assert native_frame_id(1000, 50.0) == 1000  # extension videos are annotated at their own 50fps
+    fixed = clip_frame_indices(600, 1200, 29.97, anchor="action_start", fix_frame_ids=True)
+    assert fixed[-1] < 300 and len(fixed) == 32
+    shifted = clip_frame_indices(600, 1200, 60.0, anchor="action_start", shift_frames=70)
+    assert shifted[-1] == clip_frame_indices(600, 1200, 60.0, anchor="action_start")[-1] + 70

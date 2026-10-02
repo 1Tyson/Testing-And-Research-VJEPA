@@ -128,6 +128,7 @@ def main():
     p.add_argument("--tries", type=int, default=3)
     p.add_argument("--max_hours", type=float, default=10.5, help="stop starting new downloads after this")
     p.add_argument("--copy_from", default=None, help="take videos from a local folder instead of downloading")
+    p.add_argument("--videos_file", default=None, help="only these video_ids (one per line)")
     p.add_argument("--retry_failed", action="store_true",
                    help="re-download and re-evaluate clips that failed to decode (not the windows past the video end)")
     p.add_argument("--decode_fallback", choices=["none", "pyav"], default="none", help="see eval_ek100.py")
@@ -147,6 +148,9 @@ def main():
                 f.write(line + "\n")
 
     clips = pd.read_csv(os.path.join(args.work_dir, "val_clips.csv"))
+    if args.videos_file:
+        with open(args.videos_file) as f:
+            clips = clips[clips.video_id.isin(f.read().split())]
     vi = pd.read_csv(args.video_info).set_index("video_id")
     videos = clips.sort_values("video_order").drop_duplicates("video_id")
     if args.retry_failed:
@@ -159,7 +163,7 @@ def main():
         r for r in videos.itertuples()
         if any(not set(clips.clip_id[clips.video_id == r.video_id]) <= done[a] for a in args.anchors)
     ]
-    video_root = os.path.commonpath(list(videos.video_path))
+    video_root = os.path.commonpath([os.path.dirname(p) for p in videos.video_path])
     watch = os.path.join(video_root, "_stream_state")
     shutil.rmtree(watch, ignore_errors=True)
     os.makedirs(watch)
@@ -175,7 +179,8 @@ def main():
         run = (f"{sys.executable} {here}/eval_ek100.py --work_dir {args.work_dir} --out_dir {args.out_dir} "
                f"--vitl_ckpt {args.vitl_ckpt} --probe_ckpt {args.probe_ckpt} --device {device} "
                f"--shard_id {i} --num_shards {len(args.gpus)} --dtype {args.dtype} --num_workers {args.num_workers} "
-               f"--anchors {' '.join(args.anchors)} --watch_dir {watch} --delete_after --decode_fallback {args.decode_fallback} {args.eval_args}")
+               f"--anchors {' '.join(args.anchors)} --watch_dir {watch} --delete_after --decode_fallback {args.decode_fallback} {args.eval_args}"
+               + (f" --only_videos {os.path.abspath(args.videos_file)}" if args.videos_file else ""))
         cmd = f"for t in 1 2 3 4 5; do {run} && break; echo '[eval restart '$t']'; done"
         log_f = open(os.path.join(args.out_dir, f"eval_gpu{g}.log"), "a")
         procs.append(subprocess.Popen(["bash", "-c", cmd], stdout=log_f, stderr=subprocess.STDOUT))

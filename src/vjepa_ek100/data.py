@@ -15,7 +15,7 @@ class EK100ClipDataset(Dataset):
     keeps its last VideoReader open instead of re-indexing an hour-long 1080p file."""
 
     def __init__(self, clips, transform, frames_per_clip=32, fps=8, anticipation_time=1.0, anchor="official",
-                 decode_fallback=None):
+                 decode_fallback=None, fix_frame_ids=False, future_shift_slots=0):
         self.clips = clips.reset_index(drop=True)
         self.transform = transform
         self.frames_per_clip = frames_per_clip
@@ -23,6 +23,9 @@ class EK100ClipDataset(Dataset):
         self.anticipation_time = anticipation_time
         self.anchor = anchor
         self.decode_fallback = decode_fallback  # "pyav": retry frames decord cannot read (in-range clips only)
+        self.fix_frame_ids = fix_frame_ids
+        # >0: also return the clip shifted later by this many sampled frames ("oracle" future window)
+        self.future_shift_slots = future_shift_slots
         self._vr_path = None
         self._vr = None
 
@@ -44,39 +47,43 @@ class EK100ClipDataset(Dataset):
             self._vr_path = path
         return self._vr
 
+    def _decode(self, vr, path, indices, fps, n_frames):
+        try:
+            return vr.get_batch(indices).asnumpy(), "decord"
+        except Exception:
+            # frames past the end do not exist: skipped, exactly like the official loader
+            if self.decode_fallback != "pyav" or int(indices.max()) >= n_frames:
+                raise
+            self._vr_path = None
+            return pyav_frames(path, indices, fps), "pyav"
+
     def __getitem__(self, i):
         r = self.clips.iloc[i]
-        ok, err, decoder = True, None, "decord"
-        indices = None
+        ok, err, decoder, future = True, None, "decord", None
         try:
             vr = self._reader(r.video_path)
             fps, n_frames = vr.get_avg_fps(), len(vr)
-            indices = clip_frame_indices(
-                r.start_frame,
-                r.stop_frame,
-                fps,
-                frames_per_clip=self.frames_per_clip,
-                fps=self.fps,
-                anticipation_time=self.anticipation_time,
-                anticipation_point=0.0,
-                anchor=self.anchor,
-            )
-            try:
-                buffer = vr.get_batch(indices).asnumpy()
-            except Exception:
-                # frames past the end do not exist: skipped, exactly like the official loader
-                if self.decode_fallback != "pyav" or int(indices.max()) >= n_frames:
-                    raise
-                self._vr_path = None
-                buffer = pyav_frames(r.video_path, indices, fps)
-                decoder = "pyav"
+
+            def indices(shift=0):
+                return clip_frame_indices(
+                    r.start_frame, r.stop_frame, fps, frames_per_clip=self.frames_per_clip, fps=self.fps,
+                    anticipation_time=self.anticipation_time, anticipation_point=0.0, anchor=self.anchor,
+                    fix_frame_ids=self.fix_frame_ids, shift_frames=shift,
+                )
+
+            buffer, decoder = self._decode(vr, r.video_path, indices(), fps, n_frames)
             video = self.transform(buffer)
+            if self.future_shift_slots:
+                shift = self.future_shift_slots * int(fps / self.fps)
+                buf_f, dec_f = self._decode(self._reader(r.video_path), r.video_path, indices(shift), fps, n_frames)
+                future = self.transform(buf_f)
+                decoder = "pyav" if "pyav" in (decoder, dec_f) else decoder
         except Exception as e:  # the official loader silently skips such clips; we flag them
             print(f"[warn] clip {r.clip_id} ({r.video_id}) failed: {e!r}")
             ok, err = False, repr(e)[:300]
             self._vr_path = None
             video = torch.zeros(3, self.frames_per_clip, 1, 1)
-        return dict(video=video, clip_id=int(r.clip_id), ok=ok, err=err, decoder=decoder)
+        return dict(video=video, future=future, clip_id=int(r.clip_id), ok=ok, err=err, decoder=decoder)
 
 
 def worker_init_fn(_):
@@ -112,6 +119,7 @@ def collate(batch):
     ok = [b for b in batch if b["ok"]]
     return dict(
         video=torch.stack([b["video"] for b in ok]) if ok else None,
+        future=torch.stack([b["future"] for b in ok]) if ok and ok[0]["future"] is not None else None,
         clip_id=torch.tensor([b["clip_id"] for b in ok], dtype=torch.long),
         failed={b["clip_id"]: b["err"] for b in batch if not b["ok"]},
         pyav=[b["clip_id"] for b in ok if b["decoder"] == "pyav"],
