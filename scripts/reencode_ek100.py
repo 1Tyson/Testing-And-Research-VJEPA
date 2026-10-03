@@ -33,6 +33,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from stream_eval_ek100 import fetch  # noqa: E402
 
 
+MANIFEST_COLS = ["video_id", "split", "ok", "mbps", "frames_written", "filled_frames", "filled_ranges", "src_fps",
+                 "encode_sec", "src_w", "src_h", "out_w", "out_h", "pad_w", "pad_h", "src_frames", "out_frames",
+                 "out_fps", "src_fps_decord", "error"]
+
+
 def ffmpeg_exe():
     exe = shutil.which("ffmpeg")
     if exe:
@@ -49,38 +54,94 @@ def target_size(h, w, short_side):
     return short_side, int(short_side * w / h)
 
 
+def ranges(idx):
+    """[3,4,5,9] -> "3-5,9" (for the manifest)."""
+    out, i = [], 0
+    while i < len(idx):
+        j = i
+        while j + 1 < len(idx) and idx[j + 1] == idx[j] + 1:
+            j += 1
+        out.append(f"{idx[i]}-{idx[j]}" if j > i else f"{idx[i]}")
+        i = j + 1
+    return ",".join(out)
+
+
+def decoded_frames(src, expected, filled):
+    """Yield exactly `expected` RGB frames in presentation order, frame i at index i as decord counts them.
+
+    Some original EK100 files contain corrupt packets (PyAV raises InvalidDataError, decord fails on
+    clips near them). Those packets are skipped; a frame that cannot be decoded is replaced by the
+    previous one so every later frame keeps its index. The replaced indices are appended to `filled`.
+    """
+    import av
+
+    with av.open(src) as c:
+        s = c.streams.video[0]
+        s.thread_type = "AUTO"
+        fps = float(s.average_rate)
+        t0 = s.start_time or 0
+        nxt, last, counter = 0, None, 0
+
+        def frames_of(pkt):
+            try:
+                return pkt.decode()
+            except av.error.InvalidDataError:
+                return []
+
+        for pkt in c.demux(s):
+            for fr in frames_of(pkt):
+                idx = round(float((fr.pts - t0) * s.time_base) * fps) if fr.pts is not None else counter
+                counter += 1
+                if idx < nxt or idx >= expected:
+                    continue
+                img = fr.to_ndarray(format="rgb24")
+                while nxt < idx:  # frames lost to corrupt packets
+                    filled.append(nxt)
+                    yield last if last is not None else img
+                    nxt += 1
+                last = img
+                yield img
+                nxt += 1
+    while nxt < expected:  # missing frames at the very end
+        filled.append(nxt)
+        yield last
+        nxt += 1
+
+
 def reencode(src, dst, short_side, crf, preset, threads, pix_fmt="yuv420p"):
     """Decode every frame, resize like the eval, encode. Returns a dict for the manifest."""
     import av
     import cv2
+    from decord import VideoReader, cpu
 
     t0 = time.time()
     os.makedirs(os.path.dirname(dst), exist_ok=True)
+    vr = VideoReader(src, ctx=cpu(0))
+    expected = len(vr)
+    del vr
     with av.open(src) as c:
-        s = c.streams.video[0]
-        s.thread_type = "AUTO"
-        rate = s.average_rate
-        proc, n, size = None, 0, None
-        for fr in c.decode(s):
-            img = fr.to_ndarray(format="rgb24")
-            if proc is None:
-                h, w = img.shape[:2]
-                oh, ow = target_size(h, w, short_side)
-                pw, ph = ow + ow % 2, oh + oh % 2
-                size = dict(src_w=w, src_h=h, out_w=ow, out_h=oh, pad_w=pw - ow, pad_h=ph - oh)
-                cmd = [ffmpeg_exe(), "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
-                       "-s", f"{pw}x{ph}", "-r", str(rate), "-i", "-", "-an", "-c:v", "libx264", "-preset", preset,
-                       "-crf", str(crf), "-pix_fmt", pix_fmt, "-threads", str(threads), dst]
-                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-            small = cv2.resize(img, (ow, oh), interpolation=cv2.INTER_LINEAR)
-            if size["pad_w"] or size["pad_h"]:  # pad right / bottom: the center crop does not move
-                small = np.pad(small, ((0, size["pad_h"]), (0, size["pad_w"]), (0, 0)), mode="edge")
-            proc.stdin.write(small.tobytes())
-            n += 1
+        rate = c.streams.video[0].average_rate
+    proc, n, size, filled = None, 0, None, []
+    for img in decoded_frames(src, expected, filled):
+        if proc is None:
+            h, w = img.shape[:2]
+            oh, ow = target_size(h, w, short_side)
+            pw, ph = ow + ow % 2, oh + oh % 2
+            size = dict(src_w=w, src_h=h, out_w=ow, out_h=oh, pad_w=pw - ow, pad_h=ph - oh)
+            cmd = [ffmpeg_exe(), "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
+                   "-s", f"{pw}x{ph}", "-r", str(rate), "-i", "-", "-an", "-c:v", "libx264", "-preset", preset,
+                   "-crf", str(crf), "-pix_fmt", pix_fmt, "-threads", str(threads), dst]
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        small = cv2.resize(img, (ow, oh), interpolation=cv2.INTER_LINEAR)
+        if size["pad_w"] or size["pad_h"]:  # pad right / bottom: the center crop does not move
+            small = np.pad(small, ((0, size["pad_h"]), (0, size["pad_w"]), (0, 0)), mode="edge")
+        proc.stdin.write(small.tobytes())
+        n += 1
     proc.stdin.close()
     if proc.wait() != 0:
         raise RuntimeError("ffmpeg failed")
-    return dict(frames_written=n, src_fps=float(rate), encode_sec=round(time.time() - t0, 1), **size)
+    return dict(frames_written=n, src_fps=float(rate), encode_sec=round(time.time() - t0, 1),
+                filled_frames=len(filled), filled_ranges=ranges(filled)[:500], **size)
 
 
 def verify(src, dst, info):
@@ -144,11 +205,15 @@ def main():
         vids = [x for x in vids if x[0] in keep]
     vids = vids[args.shard_id :: args.num_shards]
 
+    if os.path.exists(manifest_path):  # rewrite with the fixed columns, keeping only finished videos
+        old = pd.read_csv(manifest_path, dtype=str)
+        old = old[old.ok == "True"].reindex(columns=MANIFEST_COLS)
+        old.to_csv(manifest_path, index=False)
     done = set()
     for m in glob.glob(args.done_glob, recursive=True) + [manifest_path]:
         if os.path.exists(m):
-            d = pd.read_csv(m)
-            done |= set(d.video_id[d.ok])
+            d = pd.read_csv(m, dtype=str)
+            done |= set(d.video_id[d.ok == "True"])
     todo = [x for x in vids if x[0] not in done]
     vi = pd.read_csv(os.path.join(args.annotations_dir, "EPIC_100_video_info.csv")).set_index("video_id")
     log(f"shard {args.shard_id}/{args.num_shards}: {len(vids)} videos, {len(vids) - len(todo)} already done, "
@@ -193,8 +258,9 @@ def main():
         ready.put(None)
 
     def append_manifest(row):
-        with lock:
-            pd.DataFrame([row]).to_csv(manifest_path, mode="a", header=not os.path.exists(manifest_path), index=False)
+        with lock:  # fixed column order: failed rows have fewer fields
+            pd.DataFrame([row]).reindex(columns=MANIFEST_COLS).to_csv(
+                manifest_path, mode="a", header=not os.path.exists(manifest_path), index=False)
 
     def encoder():
         while True:
@@ -244,7 +310,8 @@ def main():
         w.join()
     if os.path.exists(manifest_path):
         m = pd.read_csv(manifest_path)
-        log(f"done: {int(m.ok.sum())} ok, {int((~m.ok).sum())} failed in this output; {out_gb():.1f} GB, "
+        ok = m.ok.astype(str) == "True"
+        log(f"done: {int(ok.sum())} ok, {int((~ok).sum())} failed in this output; {out_gb():.1f} GB, "
             f"{(time.time() - t_start) / 3600:.2f} h")
 
 
