@@ -128,12 +128,14 @@ def predict_future(model, x, ats):
     return out[0] if isinstance(out, tuple) else out
 
 
-def oracle_forward(model, probe, x, xf, ats):
+def oracle_forward(model, probe, x, xf, ats, grid=16, pool=0):
     """Probe outputs for the predictor's future tokens and for stand-ins, plus how well it predicts.
 
     oracle:   real encoder tokens of the predicted time step (from the clip shifted into the future)
     enconly:  no future tokens at all
     copylast: last observed time step repeated (a "nothing changes" forecast)
+    pool > 0 also returns the encoder / predicted / real future tokens pooled to pool x pool per time step
+    (feats [B, T, P, D], feats_pred / feats_real [B, P, D]) for training new probes (scripts/cv_probe.py).
     """
     x_ctx = model.encoder(x)
     pred = predict_future(model, x_ctx, ats)
@@ -150,7 +152,11 @@ def oracle_forward(model, probe, x, xf, ats):
         cos_pred=F.cosine_similarity(pred.float(), real.float(), dim=-1).mean(1),
         cos_copylast=F.cosine_similarity(last.float(), real.float(), dim=-1).mean(1),
     )
-    return outs, {k: v.cpu().numpy() for k, v in cos.items()}
+    extra = {k: v.cpu().numpy() for k, v in cos.items()}
+    if pool:
+        f16 = lambda t: pool_tokens(t, grid, pool).cpu().numpy().astype(np.float16)  # noqa: E731
+        extra.update(feats=f16(x_ctx), feats_pred=f16(pred)[:, 0], feats_real=f16(real)[:, 0])
+    return outs, extra
 
 
 def evaluate(todo, anchor, writers, model, probe, data_cfg, args, device, dtype, stats):
@@ -192,9 +198,10 @@ def evaluate(todo, anchor, writers, model, probe, data_cfg, args, device, dtype,
                 ats = torch.full((x.shape[0],), at, device=device)
                 if args.oracle:
                     with torch.autocast(device.type, dtype=dtype, enabled=dtype != torch.float32):
-                        outs, cos = oracle_forward(model, probe, x, batch["future"].to(device), ats)
+                        outs, extra = oracle_forward(model, probe, x, batch["future"].to(device), ats, grid,
+                                                     args.save_feats_pool)
                     ids = batch["clip_id"].numpy()
-                    writer.add(ids, outs["base"], extra=cos)
+                    writer.add(ids, outs["base"], extra=extra)
                     for v in ORACLE_VARIANTS:
                         writers[v].add(ids, outs[v])
                 else:
@@ -252,7 +259,8 @@ def main():
                    help="convert annotation frame ids to native fps (29.97/47.95/90 fps videos); not in official code")
     p.add_argument("--decode_fallback", choices=["none", "pyav"], default="none",
                    help="pyav: decode with PyAV the in-range clips decord fails on (the official loader drops them)")
-    p.add_argument("--save_feats_pool", type=int, default=0, help="also save features pooled to PxP per time step")
+    p.add_argument("--save_feats_pool", type=int, default=0, help="also save features pooled to PxP per time step "
+                   "(with --oracle: also the predicted and the real future tokens)")
     args = p.parse_args()
 
     add_vjepa2_to_path(args.vjepa2_root)

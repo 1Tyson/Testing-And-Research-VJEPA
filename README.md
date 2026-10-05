@@ -12,6 +12,13 @@ Kiểm chứng và nghiên cứu cải tiến **V-JEPA 2** cho bài toán action
 Không dùng bản video đã encode lại (ví dụ 256p crf 23): nó làm điểm tụt vài điểm, xem `results/verify_ek100_vitl.md`.
 Nếu cần kiểm tra một dataset video có phải bản gốc không, chạy `notebooks/kaggle_check_dataset.ipynb`.
 
+### Nghiên cứu predictor (dùng bản sao 292p của tập val: `ek100-292-val-0/1`)
+1. `notebooks/kaggle_reencode_ek100.ipynb` (CPU): tạo bản sao 292p.
+2. `notebooks/kaggle_verify_292.ipynb`: kiểm tra bản sao so với video gốc.
+3. `notebooks/kaggle_predictor_oracle.ipynb`: oracle với probe đóng băng.
+4. `notebooks/kaggle_cv_probe.ipynb`: train probe mới (cross-validation theo người tham gia) cho enc / enc+pred / enc+token thật.
+   Kết quả ghi ở `results/predictor_oracle.md`.
+
 ### Notebook cũ (dùng với dataset video có sẵn)
 Mở [notebooks/kaggle_verify_ek100.ipynb](notebooks/kaggle_verify_ek100.ipynb) (GPU T4 x2, Internet On).
 Notebook `git clone` repo này, nên repo phải để **public**, hoặc upload repo lên Kaggle dưới dạng dataset.

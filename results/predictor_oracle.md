@@ -40,3 +40,11 @@ Cosine giữa token dự đoán và token tương lai thật: predictor 0.46, co
   thật (lệch phân bố), và cũng không dùng được khi bỏ hẳn token tương lai. Vì vậy các con số oracle/enconly với probe
   đóng băng là **cận dưới bị nhiễu**, không phải khoảng cải thiện thật.
 - Phép thử công bằng là **train probe mới** cho từng loại đầu vào (enc / enc+pred / enc+token thật).
+
+## Bước 0b (đang chạy): train lại probe, cross-validation trên val (`notebooks/kaggle_cv_probe.ipynb`)
+- `eval_ek100.py --oracle --save_feats_pool 4` lưu token encoder (16 bước × 4×4 ô), token dự đoán và token thật của bước được
+  dự đoán (pool 4×4), khoảng 0.6 MB/clip.
+- `scripts/cv_probe.py` train một attentive probe nhỏ (thêm embedding vị trí cho từng bước thời gian và ô, 1 block self-attention,
+  3 query verb/noun/action) cho mỗi biến thể `enc`, `enc_pred`, `enc_real`, `enc_copylast`, `pred`, `real`. Người tham gia của val được chia
+  thành 2 fold; 10% của fold train dùng để chọn epoch; chạy 3 seed. Dự đoán out-of-fold, rồi tính mean-class R@5 trên toàn tập val.
+- Câu hỏi cần trả lời: `enc_real − enc_pred` (predictor tốt hơn giúp được bao nhiêu) và `enc_pred − enc` (predictor hiện tại giúp bao nhiêu).
