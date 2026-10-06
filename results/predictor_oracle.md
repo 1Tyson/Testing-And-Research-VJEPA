@@ -148,14 +148,27 @@ gốc** (lần ra 32.71). Mỗi ô ghi clean / official; khoảng tin cậy 95% 
   2. Tham số được chọn trên val (dù có cross-fitting). Bản sạch hơn là chọn trên một phần tách ra từ tập train.
   3. So sánh với các phương pháp khác chỉ công bằng khi áp cùng cách chỉnh, hoặc khi nói rõ là cách chỉnh này áp dụng được cho mọi model.
 
-## Bước tiếp theo (đang chạy)
-1. **Kiểm tra độ bền** của bước 0d (chạy lại `kaggle_posthoc_ek100`, chỉ cần CPU):
-   - cross-fitting với 5 fold và leave-one-participant-out;
-   - kết quả với tham số cố định, không tune;
-   - bảng lưới τ×β để xem vùng tối ưu có rộng không.
+## Bước 1: độ bền của cách chấm lại (video gốc, action, clean / official)
+| cách chọn τ, β | giao thức gốc (`official`) | giao thức chuẩn (`action_start`) |
+|---|---|---|
+| probe Meta (không chỉnh) | 31.23 / 32.69 | 14.60 / 13.22 |
+| cross-fit 2 fold | 37.53 / 39.27 | 16.82 / 14.80 |
+| cross-fit 5 fold | 37.24 / 38.56 | 17.09 / 14.93 |
+| leave-one-participant-out (32 người) | 37.16 / 38.73 | 16.64 / 14.36 |
+| cố định τ=0.5, β=0.5 (không tune) | 37.69 / 38.84 | 17.24 / 14.89 |
+| cố định τ=0.3, β=0.5 (không tune) | 36.83 / 38.50 | 16.99 / 14.75 |
+| cố định τ=1, β=0 | 16.21 / 16.01 | 6.89 / 5.83 |
 
-   Không tune trên tập train: probe của Meta đã được train trên chính tập train, nên logits trên train quá tự tin, và τ chọn trên đó sẽ
-   bị lệch.
+- **Kết quả bền:** mọi cách chia fold và cả tham số cố định đều cho action official khoảng 38.5–39.3 (so với 32.7) ở giao thức gốc, và
+  khoảng 14.4–15.2 (so với 13.2) ở giao thức chuẩn. Trên bảng lưới, mọi điểm có τ ∈ [0.2, 0.6] và β ∈ [0.25, 2] đều cho khoảng 35–39.4
+  (official, giao thức gốc).
+- **τ = 1** (giá trị tối ưu theo lý thuyết, nếu xác suất được hiệu chỉnh đúng) lại làm điểm **giảm mạnh**, còn τ tốt nhất khoảng 0.3–0.5.
+  Nghĩa là logits của probe không phải log-xác suất được hiệu chỉnh đúng. Đây là một điểm đáng phân tích trong bài báo.
+- Verb (τ 0.3–0.4): +13 đến +14 ở mọi cách chia. Noun (τ 0.3): +4.
+
+## Bước tiếp theo (đang chạy)
+Lưu ý: không tune trên tập train. Probe của Meta đã được train trên chính tập train, nên logits trên train quá tự tin, và τ chọn trên
+đó sẽ bị lệch.
 2. **Tính tổng quát** (`kaggle_eval_vitg384`):
    - chạy probe ViT-g/384 của Meta trên video gốc (bài báo báo cáo 39.7);
    - áp cùng cách chỉnh.
