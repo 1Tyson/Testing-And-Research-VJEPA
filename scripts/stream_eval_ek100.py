@@ -187,6 +187,20 @@ def main():
 
     stats = dict(ok=0, failed=[], bytes=0)
     in_flight = [0]
+    last_report = [time.time()]
+
+    def report_speed(every=int(os.environ.get("SPEED_EVERY", 600))):
+        """Every `every` s, log each GPU's latest progress line (visible in the notebook while it runs)."""
+        if time.time() - last_report[0] < every:
+            return
+        last_report[0] = time.time()
+        for g in args.gpus:
+            try:
+                with open(os.path.join(args.out_dir, f"eval_gpu{g}.log")) as f:
+                    lines = [l.strip() for l in f if "clip/s" in l or "Traceback" in l or "Error" in l]
+            except OSError:
+                lines = []
+            log(f"[speed gpu{g}] {lines[-1] if lines else 'model loading / first batch...'}")
 
     def on_disk():
         return len(glob.glob(os.path.join(watch, "*.ready"))) + in_flight[0]
@@ -216,7 +230,9 @@ def main():
             while on_disk() >= args.max_videos_on_disk:  # back-pressure: wait for the GPUs
                 if all(pr.poll() is not None for pr in procs):
                     break
+                report_speed()
                 time.sleep(5)
+            report_speed()
             if (time.time() - t_start) / 3600 > args.max_hours:
                 stopped_early = True
                 log(f"[stop] {args.max_hours}h budget reached: no new downloads, finishing what is on disk")
@@ -230,6 +246,7 @@ def main():
         time.sleep(30)
         n_done = len(glob.glob(os.path.join(watch, "*.done")))
         log(f"[wait] evaluated {n_done}/{stats['ok']} downloaded videos")
+        report_speed()
     codes = [pr.returncode for pr in procs]
     n_done = len(glob.glob(os.path.join(watch, "*.done")))
     log(f"finished: {n_done} videos evaluated, {len(stats['failed'])} download failures {stats['failed']}, "

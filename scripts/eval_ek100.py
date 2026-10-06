@@ -228,6 +228,8 @@ def evaluate(todo, anchor, writers, model, probe, data_cfg, args, device, dtype,
         for w in writers.values():
             w.flush()
         stats["clips"] += seen
+        if seen:
+            print(f"[{anchor}] batch of {seen} clips done: {seen / (time.time() - t0):.3f} clip/s", flush=True)
     return None
 
 
