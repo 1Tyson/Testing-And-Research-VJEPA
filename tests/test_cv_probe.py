@@ -37,7 +37,7 @@ def test_cv_probe_finds_information_in_the_real_future(tmp_path):
     out = tmp_path / "cv.json"
     subprocess.run([sys.executable, os.path.join(HERE, "..", "scripts", "cv_probe.py"), "--work_dir", str(work),
                     "--logits_root", str(tmp_path / "logits"), "--out", str(out), "--device", "cpu",
-                    "--variants", "enc", "enc_real", "real", "--seeds", "0", "--epochs", "6",
+                    "--variants", "enc", "enc_real", "real", "enc_fc", "enc_predfc", "--seeds", "0", "--epochs", "6",
                     "--dim", "32", "--heads", "2", "--batch_size", "32", "--lr", "3e-3", "--bootstrap", "50"],
                    check=True)
     res = json.loads(out.read_text())
@@ -48,3 +48,5 @@ def test_cv_probe_finds_information_in_the_real_future(tmp_path):
     assert res["mean"]["real"]["action"] > 70
     assert res["mean"]["enc_real"]["action"] - res["mean"]["enc"]["action"] > 30
     assert "enc_real - enc_pred" not in res["action_diff"]
+    assert res["mean"]["enc_fc"]["cosine_to_real"] > res["pooled_cosine_to_real"]["pred"]  # the forecaster learns
+    assert "enc_fc - enc" in res["action_diff"]

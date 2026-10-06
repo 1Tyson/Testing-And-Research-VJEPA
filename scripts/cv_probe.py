@@ -9,6 +9,8 @@ pooled tokens saved by `eval_ek100.py --oracle --save_feats_pool P`:
   enc_real      + the REAL encoder tokens of that time step                        (= a perfect predictor)
   enc_copylast  + the last observed time step repeated  (control: an extra slot without new information)
   pred, real    the future tokens alone
+  enc_fc        + future tokens from a small forecaster trained on enc -> real future (cosine loss, jointly with the probe)
+  enc_predfc    + the V-JEPA 2 predictor's tokens refined by such a forecaster (residual, starts at the predictor)
 
 Val participants are split into folds (no participant in both train and test of a fold). Every clip is
 predicted by the probe that did not see its participant; mean-class R@5 is computed on these out-of-fold
@@ -39,7 +41,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from vjepa_ek100.metrics import mean_class_recall, topk_hits  # noqa: E402
 
 TASKS = ("verb", "noun", "action")
-ALL_VARIANTS = ("enc", "enc_pred", "enc_real", "enc_copylast", "pred", "real")
+ALL_VARIANTS = ("enc", "enc_pred", "enc_real", "enc_copylast", "pred", "real", "enc_fc", "enc_predfc")
+FC_VARIANTS = ("enc_fc", "enc_predfc")
+DEFAULT_VARIANTS = ("enc", "enc_pred", "enc_real", "enc_copylast", "pred", "real")
 
 
 def load_features(dir_):
@@ -112,6 +116,39 @@ class Probe(nn.Module):
         return [head(self.drop(o[:, i])) for i, head in enumerate(self.heads)]
 
 
+class Forecaster(nn.Module):
+    """Predicts the pooled future tokens from the pooled encoder tokens (and, if refine, the V-JEPA 2 prediction).
+
+    One learned query per cell sits in the future time slot; queries and context go through self-attention blocks.
+    refine: output = predictor tokens + correction, the correction starting at zero.
+    """
+
+    def __init__(self, in_dim, num_slots, cells, dim=512, heads=8, depth=2, drop=0.1, refine=False):
+        super().__init__()
+        self.cells, self.refine = cells, refine
+        self.inp = nn.Sequential(nn.LayerNorm(in_dim), nn.Linear(in_dim, dim))
+        self.pos = nn.Parameter(torch.zeros(num_slots * cells, dim))
+        nn.init.trunc_normal_(self.pos, std=0.02)
+        self.query = nn.Parameter(torch.randn(cells, dim) * 0.02)
+        layer = nn.TransformerEncoderLayer(dim, heads, 4 * dim, drop, batch_first=True, norm_first=True, activation="gelu")
+        self.blocks = nn.TransformerEncoder(layer, depth, enable_nested_tensor=False)
+        self.out = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, in_dim))
+        if refine:
+            nn.init.zeros_(self.out[1].weight)
+            nn.init.zeros_(self.out[1].bias)
+
+    def forward(self, enc, pred):
+        B, L = enc.shape[0], enc.shape[1]
+        n_ctx = (self.pos.shape[0] // self.cells - 1) * self.cells
+        fut_pos = self.pos[n_ctx:]
+        q = self.query.unsqueeze(0).expand(B, -1, -1) + fut_pos
+        if self.refine:
+            q = q + self.inp(pred)
+        h = self.blocks(torch.cat([self.inp(enc) + self.pos[:L], q], 1))[:, L:]
+        out = self.out(h)
+        return pred + out if self.refine else out
+
+
 class Tokens:
     """Builds the token sequence of a variant for a batch of clip indices (features stay on `device`)."""
 
@@ -150,7 +187,12 @@ def train_one(tokens, variant, train_idx, test_idx, labels, n_cls, args, seed, d
     hold, fit = perm[:n_hold], perm[n_hold:]
     model = Probe(tokens.D, tokens.T + 1, tokens.P, [n_cls[k] for k in TASKS], args.dim, args.heads, args.depth,
                   args.dropout).to(device)
-    slots = tokens.slots(variant, device)
+    fc = None
+    if variant in FC_VARIANTS:
+        fc = Forecaster(tokens.D, tokens.T + 1, tokens.P, args.dim, args.heads, args.fc_depth, args.dropout,
+                        refine=variant == "enc_predfc").to(device)
+        model.fc = fc  # optimized, saved and switched train/eval together with the probe
+    slots = tokens.slots("enc_pred" if fc is not None else variant, device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     steps_per_epoch = math.ceil(len(fit) / args.batch_size)
     total, warm = args.epochs * steps_per_epoch, steps_per_epoch
@@ -159,15 +201,27 @@ def train_one(tokens, variant, train_idx, test_idx, labels, n_cls, args, seed, d
     scaler = torch.amp.GradScaler(enabled=device.type == "cuda")
     lab_t = {k: torch.from_numpy(labels[k]).to(device) for k in TASKS}
 
-    def predict(idx):
+    def forward(b):
+        """Probe outputs, plus (forecaster variants) the forecast and the real future tokens."""
+        if fc is None:
+            return model(tokens(variant, b).float(), slots), None, None
+        enc = tokens("enc", b).float()
+        fut = fc(enc, tokens.pred[b].float())
+        return model(torch.cat([enc, fut], 1), slots), fut, tokens.real[b].float()
+
+    def predict(idx, with_cos=False):
         model.eval()
-        outs = {k: [] for k in TASKS}
+        outs, cos = {k: [] for k in TASKS}, []
         with torch.inference_mode(), torch.autocast(device.type, dtype=torch.float16, enabled=device.type == "cuda"):
             for i in range(0, len(idx), 512):
                 b = torch.from_numpy(idx[i:i + 512]).to(device)
-                for k, o in zip(TASKS, model(tokens(variant, b).float(), slots)):
-                    outs[k].append(o.float().cpu().numpy())
-        return {k: np.concatenate(v) for k, v in outs.items()}
+                o, fut, real = forward(b)
+                for k, ok in zip(TASKS, o):
+                    outs[k].append(ok.float().cpu().numpy())
+                if fut is not None:
+                    cos.append(F.cosine_similarity(fut.float(), real, dim=-1).mean(1).cpu().numpy())
+        outs = {k: np.concatenate(v) for k, v in outs.items()}
+        return (outs, np.concatenate(cos) if cos else None) if with_cos else outs
 
     best, best_state, best_epoch = -1.0, None, -1
     for epoch in range(args.epochs):
@@ -176,9 +230,11 @@ def train_one(tokens, variant, train_idx, test_idx, labels, n_cls, args, seed, d
         for i in range(0, len(order), args.batch_size):
             b = order[i:i + args.batch_size]
             with torch.autocast(device.type, dtype=torch.float16, enabled=device.type == "cuda"):
-                outs = model(tokens(variant, b).float(), slots)
+                outs, fut, real = forward(b)
                 loss = sum(F.cross_entropy(o.float(), lab_t[k][b], label_smoothing=args.label_smoothing)
                            for k, o in zip(TASKS, outs))
+                if fut is not None:
+                    loss = loss + args.fc_weight * (1 - F.cosine_similarity(fut.float(), real, dim=-1)).mean()
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
@@ -191,7 +247,8 @@ def train_one(tokens, variant, train_idx, test_idx, labels, n_cls, args, seed, d
             best, best_epoch = score, epoch
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
     model.load_state_dict(best_state)
-    return predict(test_idx), best_epoch
+    out, cos = predict(test_idx, with_cos=True)
+    return out, best_epoch, cos
 
 
 def scores(logits, labels, n_cls):
@@ -216,7 +273,7 @@ def main():
     p.add_argument("--logits_root", required=True, help="--out_dir of eval_ek100.py --oracle --save_feats_pool")
     p.add_argument("--anchor", default="action_start")
     p.add_argument("--out", required=True)
-    p.add_argument("--variants", nargs="+", default=list(ALL_VARIANTS), choices=ALL_VARIANTS)
+    p.add_argument("--variants", nargs="+", default=list(DEFAULT_VARIANTS), choices=ALL_VARIANTS)
     p.add_argument("--num_folds", type=int, default=2)
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     p.add_argument("--epochs", type=int, default=30)
@@ -228,6 +285,8 @@ def main():
     p.add_argument("--heads", type=int, default=8)
     p.add_argument("--depth", type=int, default=1, help="self-attention blocks before the query cross-attention")
     p.add_argument("--dropout", type=float, default=0.1)
+    p.add_argument("--fc_depth", type=int, default=2, help="forecaster self-attention blocks (enc_fc, enc_predfc)")
+    p.add_argument("--fc_weight", type=float, default=1.0, help="weight of the forecaster's cosine loss")
     p.add_argument("--holdout", type=float, default=0.1, help="share of each training fold used to pick the epoch")
     p.add_argument("--bootstrap", type=int, default=1000)
     p.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
@@ -265,6 +324,11 @@ def main():
                participants_per_fold=[sorted(c.participant[folds == f].unique().tolist()) for f in range(args.num_folds)],
                args=vars(args), released_probe=scores(released, labels, n_cls), runs={}, mean={}, std={})
     tokens = Tokens(data, torch.device("cpu") if args.features_on_cpu else device)
+    with torch.no_grad():  # how close the given future tokens are to the real ones (pooled), for the forecasters
+        cos_to_real = lambda t: float(torch.cat([  # noqa: E731
+            F.cosine_similarity(t[i:i + 512].float(), tokens.real[i:i + 512].float(), dim=-1).mean(1).cpu()
+            for i in range(0, len(ids), 512)]).mean())
+        res["pooled_cosine_to_real"] = dict(pred=cos_to_real(tokens.pred), copylast=cos_to_real(tokens.enc[:, -1]))
     for k in ("feats", "feats_pred", "feats_real"):
         del data[k]
 
@@ -274,29 +338,37 @@ def main():
         prob_sum = {k: np.zeros((len(ids), n_cls[k]), np.float32) for k in TASKS}
         for seed in args.seeds:
             oof = {k: np.zeros((len(ids), n_cls[k]), np.float32) for k in TASKS}
-            epochs = []
+            epochs, cos = [], np.full(len(ids), np.nan)
             for f in range(args.num_folds):
                 tr, te = np.where(folds != f)[0], np.where(folds == f)[0]
-                out, ep = train_one(tokens, v, tr, te, labels, n_cls, args, seed * 100 + f, device)
+                out, ep, c_te = train_one(tokens, v, tr, te, labels, n_cls, args, seed * 100 + f, device)
                 for k in TASKS:
                     oof[k][te] = out[k]
+                if c_te is not None:
+                    cos[te] = c_te
                 epochs.append(ep)
             s = scores(oof, labels, n_cls)
+            if v in FC_VARIANTS:
+                s["cosine_to_real"] = float(np.nanmean(cos))
             per_seed.append(dict(seed=seed, best_epochs=epochs, **s))
             for k in TASKS:
                 prob_sum[k] += torch.softmax(torch.from_numpy(oof[k]), 1).numpy()
             print(f"[{v:12s} seed {seed}] action {s['action']:6.2f}  verb {s['verb']:6.2f}  noun {s['noun']:6.2f}  "
-                  f"(best epochs {epochs}, {(time.time() - t0) / 60:.0f} min)", flush=True)
+                  + (f"cos->real {s['cosine_to_real']:.3f}  " if "cosine_to_real" in s else "")
+                  + f"(best epochs {epochs}, {(time.time() - t0) / 60:.0f} min)", flush=True)
         ens[v] = prob_sum
         res["runs"][v] = per_seed
         res["mean"][v] = {k: float(np.mean([r[k] for r in per_seed])) for k in TASKS}
+        if v in FC_VARIANTS:
+            res["mean"][v]["cosine_to_real"] = float(np.mean([r["cosine_to_real"] for r in per_seed]))
         res["std"][v] = {k: float(np.std([r[k] for r in per_seed])) for k in TASKS}
         res.setdefault("seed_ensemble", {})[v] = scores(prob_sum, labels, n_cls)
         with open(args.out, "w") as fh:
             json.dump(res, fh, indent=2)
 
     rng = np.random.default_rng(0)
-    pairs = [("enc_real", "enc_pred"), ("enc_pred", "enc"), ("enc_pred", "enc_copylast"), ("real", "pred")]
+    pairs = [("enc_real", "enc_pred"), ("enc_pred", "enc"), ("enc_pred", "enc_copylast"), ("real", "pred"),
+             ("enc_fc", "enc"), ("enc_predfc", "enc_pred"), ("enc_real", "enc_predfc")]
     res["action_diff"] = {}
     for a, b in pairs:
         if a in ens and b in ens:
@@ -314,11 +386,14 @@ def main():
     print(f"{'released*':14s} {r['action']:14.2f} {r['verb']:14.2f} {r['noun']:14.2f}")
     for v in args.variants:
         m, s = res["mean"][v], res["std"][v]
-        print(f"{v:14s} " + " ".join(f"{m[k]:8.2f} +-{s[k]:4.2f}" for k in TASKS))
+        print(f"{v:14s} " + " ".join(f"{m[k]:8.2f} +-{s[k]:4.2f}" for k in ("action", "verb", "noun"))
+              + (f"   cos->real {m['cosine_to_real']:.3f}" if "cosine_to_real" in m else ""))
     print("* Meta's probe trained on the 67k train clips (reference, not comparable in training data)")
+    c = res["pooled_cosine_to_real"]
+    print(f"pooled cosine to the real future: V-JEPA 2 predictor {c['pred']:.3f}, copy-last {c['copylast']:.3f}")
     for name, d in res["action_diff"].items():
         lo, hi = d["seed_ensemble_ci95"]
-        print(f"action {name:26s} {d['mean']:+6.2f}  (seed ensemble 95% CI [{lo:+.2f}, {hi:+.2f}])")
+        print(f"action {name:26s} {d['mean']:+6.2f} mean over seeds  (seed-ensemble 95% CI [{lo:+.2f}, {hi:+.2f}])")
 
 
 if __name__ == "__main__":
