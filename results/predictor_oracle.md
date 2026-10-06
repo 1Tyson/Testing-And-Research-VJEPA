@@ -86,3 +86,34 @@ sau, script in đúng thứ tự.)
 - Kết luận cho hướng nghiên cứu: khoảng cách giữa token dự đoán và token thật là lớn (cosine 0.46), và token thật có ích rõ ràng, nên
   **cải tiến predictor có cơ sở**. Bước tiếp theo rẻ nhất là thêm biến thể `enc_fc` / `enc_predfc`: một forecaster nhỏ (hoặc phần tinh
   chỉnh predictor V-JEPA 2) được train để tiến gần token thật, chạy lại trên token đã lưu mà không cần trích lại.
+
+## Bước 0c: forecaster học từ token thật (`enc_fc`, `enc_predfc`, cùng giao thức CV)
+| biến thể | action | verb | noun | cosine (pool) với token thật |
+|---|---|---|---|---|
+| `enc` | 1.89 ± 0.08 | 12.90 ± 0.40 | 6.51 ± 0.13 | |
+| `enc_pred` | 1.90 ± 0.08 | 12.42 ± 0.56 | 6.78 ± 0.19 | 0.664 (predictor V-JEPA 2) |
+| `enc_fc` | 1.98 ± 0.04 | 13.67 ± 0.63 | 6.61 ± 0.49 | 0.789 |
+| `enc_predfc` | 1.86 ± 0.14 | 12.81 ± 0.25 | 6.31 ± 0.21 | 0.818 |
+| `enc_real` | 3.64 ± 0.15 | 17.32 ± 0.57 | 9.69 ± 0.25 | 1 |
+
+Copy-last (lặp bước cuối) có cosine 0.737 trên token đã pool, tức là cao hơn predictor V-JEPA 2 (0.664). Trên token đầy đủ thì ngược lại:
+0.46 so với 0.37.
+
+Hiệu số action, trung bình theo seed (khoảng tin cậy 95% của ensemble):
+- `enc_fc − enc` = +0.09 [−0.12, +0.34]
+- `enc_predfc − enc_pred` = −0.04 [−0.23, +0.23]
+- `enc_real − enc_predfc` = +1.79 [+2.21, +2.84]
+
+**Đọc kết quả:**
+- Forecaster tiến gần token thật hơn hẳn (cosine 0.79–0.82, cao hơn cả predictor lẫn copy-last), nhưng **recall không tăng**. Phần lớn
+  cosine đến từ thành phần "tĩnh" (cảnh, đồ vật đã thấy). Phần phân biệt được action, tức là điều sắp xảy ra, chỉ là một phần dư nhỏ, và
+  forecaster train trên 4.2k clip không học được phần đó. Vì vậy **cosine/L2 với token thật không phải thước đo tốt** cho chất lượng dự báo.
+- Về nguyên tắc: forecaster chỉ nhìn token encoder và được train trên **cùng** các clip với probe, nên không thể mang thêm thông tin mới.
+  Cái lợi chỉ có thể đến từ tri thức học được trên **nhiều dữ liệu hơn**, ví dụ video không nhãn của tập train EK100 (vài trăm giờ),
+  và từ một mục tiêu nhắm vào phần thay đổi (ví dụ dự đoán `real − last` hoặc dùng loss contrastive) thay vì cosine thuần.
+- Hệ quả: hướng predictor cần làm ở **quy mô tập train**. Việc đó tốn kém: phải encode lại train (10 shard CPU) và trích token khoảng
+  15 giờ GPU, đồng thời có rủi ro ra kết quả âm tính.
+
+## Bước 0d (đang chạy): chấm lại logits của probe Meta, không train (`notebooks/kaggle_posthoc_ek100.ipynb`)
+`scripts/posthoc_ek100.py` thử logit adjustment theo prior của tập train và ghép verb–noun cho action. τ và β được chọn bằng
+cross-fitting theo người tham gia, trên logits đã có (video gốc: official 32.71 / clean 31.23; và `action_start`).
