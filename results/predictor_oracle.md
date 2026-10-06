@@ -147,3 +147,17 @@ gốc** (lần ra 32.71). Mỗi ô ghi clean / official; khoảng tin cậy 95% 
      dụng cho anticipation, không nằm ở bản thân kỹ thuật.
   2. Tham số được chọn trên val (dù có cross-fitting). Bản sạch hơn là chọn trên một phần tách ra từ tập train.
   3. So sánh với các phương pháp khác chỉ công bằng khi áp cùng cách chỉnh, hoặc khi nói rõ là cách chỉnh này áp dụng được cho mọi model.
+
+## Bước tiếp theo (đang chạy)
+1. **Kiểm tra độ bền** của bước 0d (chạy lại `kaggle_posthoc_ek100`, chỉ cần CPU):
+   - cross-fitting với 5 fold và leave-one-participant-out;
+   - kết quả với tham số cố định, không tune;
+   - bảng lưới τ×β để xem vùng tối ưu có rộng không.
+
+   Không tune trên tập train: probe của Meta đã được train trên chính tập train, nên logits trên train quá tự tin, và τ chọn trên đó sẽ
+   bị lệch.
+2. **Tính tổng quát** (`kaggle_eval_vitg384`):
+   - chạy probe ViT-g/384 của Meta trên video gốc (bài báo báo cáo 39.7);
+   - áp cùng cách chỉnh.
+
+   `scripts/slim_checkpoint.py` chỉ giữ target encoder và predictor ở fp16 (khoảng 2 GB), để 2 process eval vừa RAM của Kaggle.

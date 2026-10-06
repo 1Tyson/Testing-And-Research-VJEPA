@@ -17,7 +17,9 @@ Nếu cần kiểm tra một dataset video có phải bản gốc không, chạy
 2. `notebooks/kaggle_verify_292.ipynb`: kiểm tra bản sao so với video gốc.
 3. `notebooks/kaggle_predictor_oracle.ipynb`: oracle với probe đóng băng.
 4. `notebooks/kaggle_cv_probe.ipynb`: train probe mới (cross-validation theo người tham gia) cho enc / enc+pred / enc+token thật.
-5. `notebooks/kaggle_posthoc_ek100.ipynb` (CPU): logit adjustment / ghép verb–noun trên logits đã có, không cần train.
+5. `notebooks/kaggle_posthoc_ek100.ipynb` (CPU): logit adjustment / ghép verb–noun trên logits đã có, không cần train
+   (kèm kiểm tra độ bền: 5 fold, leave-one-participant-out, tham số cố định, bảng lưới τ×β).
+6. `notebooks/kaggle_eval_vitg384.ipynb`: probe ViT-g/384 của Meta trên video gốc (chia 2 phần chạy trên 2 tài khoản), rồi chấm lại.
    Kết quả ghi ở `results/predictor_oracle.md`.
 
 ### Notebook cũ (dùng với dataset video có sẵn)

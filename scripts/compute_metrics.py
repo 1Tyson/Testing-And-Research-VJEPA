@@ -44,7 +44,9 @@ def main():
     p.add_argument("--num_workers", type=int, default=2)
     p.add_argument("--allow_partial", action="store_true", help="report even if some clips were not evaluated yet")
     p.add_argument("--only_videos", default=None, help="file with video_ids: score only clips of these videos")
+    p.add_argument("--paper_action", type=float, default=PAPER["action"], help="paper number to compare with (ViT-g/384: 39.7)")
     args = p.parse_args()
+    PAPER["action"] = args.paper_action
 
     clips = pd.read_csv(os.path.join(args.work_dir, "val_clips.csv"))
     if args.only_videos:
