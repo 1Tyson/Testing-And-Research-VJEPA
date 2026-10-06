@@ -166,11 +166,11 @@ gốc** (lần ra 32.71). Mỗi ô ghi clean / official; khoảng tin cậy 95% 
   Nghĩa là logits của probe không phải log-xác suất được hiệu chỉnh đúng. Đây là một điểm đáng phân tích trong bài báo.
 - Verb (τ 0.3–0.4): +13 đến +14 ở mọi cách chia. Noun (τ 0.3): +4.
 
-## Bước tiếp theo (đang chạy)
 Lưu ý: không tune trên tập train. Probe của Meta đã được train trên chính tập train, nên logits trên train quá tự tin, và τ chọn trên
 đó sẽ bị lệch.
-2. **Tính tổng quát** (`kaggle_eval_vitg384`):
-   - chạy probe ViT-g/384 của Meta trên video gốc (bài báo báo cáo 39.7);
-   - áp cùng cách chỉnh.
 
-   `scripts/slim_checkpoint.py` chỉ giữ target encoder và predictor ở fp16 (khoảng 2 GB), để 2 process eval vừa RAM của Kaggle.
+## Bước 2 (đang chạy): tính tổng quát (`kaggle_eval_vitg384`)
+- chạy probe ViT-g/384 của Meta trên video gốc (bài báo báo cáo 39.7);
+- áp cùng cách chỉnh.
+
+`scripts/slim_checkpoint.py` chỉ giữ target encoder và predictor ở fp16 (khoảng 2 GB), để 2 process eval vừa RAM của Kaggle.
