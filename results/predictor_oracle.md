@@ -114,6 +114,36 @@ Hiệu số action, trung bình theo seed (khoảng tin cậy 95% của ensemble
 - Hệ quả: hướng predictor cần làm ở **quy mô tập train**. Việc đó tốn kém: phải encode lại train (10 shard CPU) và trích token khoảng
   15 giờ GPU, đồng thời có rủi ro ra kết quả âm tính.
 
-## Bước 0d (đang chạy): chấm lại logits của probe Meta, không train (`notebooks/kaggle_posthoc_ek100.ipynb`)
-`scripts/posthoc_ek100.py` thử logit adjustment theo prior của tập train và ghép verb–noun cho action. τ và β được chọn bằng
-cross-fitting theo người tham gia, trên logits đã có (video gốc: official 32.71 / clean 31.23; và `action_start`).
+## Bước 0d: chấm lại logits của probe Meta, không train (`notebooks/kaggle_posthoc_ek100.ipynb`)
+`scripts/posthoc_ek100.py` thử hai cách chỉnh:
+- logit adjustment: `z − τ·log prior`, với prior là tần suất của lớp trong `EPIC_100_train.csv`;
+- với action, ghép thêm verb–noun: `log_softmax(z_a) + β·(log_softmax(z_v)[v] + log_softmax(z_n)[n])`.
+
+τ và β được chọn bằng cross-fitting theo người tham gia (2 fold): chọn trên một nửa số người, đo trên nửa còn lại. Logits là của **video
+gốc** (lần ra 32.71). Mỗi ô ghi clean / official; khoảng tin cậy 95% là bootstrap của mức tăng clean.
+
+| giao thức | task | probe Meta | sau khi chỉnh (cross-fitted) | tăng (clean) [95% CI] | τ / β đã chọn theo fold |
+|---|---|---|---|---|---|
+| gốc (`official`, 9248 clip) | **action** | 31.23 / **32.69** | 37.53 / **39.27** | **+6.30** [+5.01, +7.00] | 0.4/1.0, 0.4/0.5 |
+| | verb | 53.58 / 58.99 | 67.55 / 72.39 | +13.97 [+10.21, +16.67] | 0.3, 0.4 |
+| | noun | 52.76 / 53.82 | 56.77 / 57.58 | +4.01 [+2.30, +5.09] | 0.3, 0.2 |
+| chuẩn (`action_start`, 9249 clip) | **action** | 14.60 / 13.22 | 16.82 / 14.80 | **+2.22** [+1.34, +2.70] | 0.3/1.0, 0.3/0.25 |
+| | verb | 28.42 / 29.01 | 42.19 / 39.85 | +13.77 [+8.18, +16.02] | 0.4, 0.4 |
+| | noun | 36.86 / 34.53 | 40.57 / 38.23 | +3.71 [+2.43, +4.92] | 0.3, 0.3 |
+| chuẩn, bản 292p (9263 clip) | action | 14.11 / 12.85 | 16.85 / 14.91 | +2.74 [+1.87, +3.21] | 0.3/1.0, 0.3/0.5 |
+
+- Action chỉ dùng logit adjustment (không ghép verb–noun), cross-fitted: giao thức gốc 34.05 / 34.92, giao thức chuẩn 15.45 / 13.80.
+  Như vậy khoảng một nửa mức tăng action đến từ prior, nửa còn lại đến từ việc ghép verb–noun.
+- Ở giao thức gốc, probe Meta ra 32.69 thay vì 32.71 như `compute_metrics`. Chênh lệch nhỏ này do các logit fp16 bằng nhau (tie) được xếp
+  thứ tự khác nhau khi lấy top-5.
+- τ và β gần như giống nhau giữa các fold và giữa các giao thức (τ ≈ 0.3–0.4, β ≈ 0.5–1). Nghĩa là cách chỉnh này ổn định, không phải do
+  may mắn khi tune.
+
+**Đọc kết quả:**
+- Đây là cải thiện lớn và rẻ: **32.7 → 39.3** (official) trên đúng giao thức của bài báo, không cần train, không cần GPU. Nguyên nhân:
+  metric mean-class bị chi phối bởi các lớp hiếm, mà probe lại thiên về các lớp phổ biến của tập train.
+- Giới hạn khi viết bài:
+  1. Logit adjustment (Menon et al., 2021) và việc ghép verb–noun đều là kỹ thuật đã biết, nên điểm mới nằm ở phân tích và ở cách áp
+     dụng cho anticipation, không nằm ở bản thân kỹ thuật.
+  2. Tham số được chọn trên val (dù có cross-fitting). Bản sạch hơn là chọn trên một phần tách ra từ tập train.
+  3. So sánh với các phương pháp khác chỉ công bằng khi áp cùng cách chỉnh, hoặc khi nói rõ là cách chỉnh này áp dụng được cho mọi model.
