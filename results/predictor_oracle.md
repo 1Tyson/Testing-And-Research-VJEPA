@@ -169,8 +169,24 @@ gốc** (lần ra 32.71). Mỗi ô ghi clean / official; khoảng tin cậy 95% 
 Lưu ý: không tune trên tập train. Probe của Meta đã được train trên chính tập train, nên logits trên train quá tự tin, và τ chọn trên
 đó sẽ bị lệch.
 
-## Bước 2 (đang chạy): tính tổng quát (`kaggle_eval_vitg384`)
-- chạy probe ViT-g/384 của Meta trên video gốc (bài báo báo cáo 39.7);
-- áp cùng cách chỉnh.
+## Bước 2: tính tổng quát với ViT-g/384 (`kaggle_eval_vitg384`, video gốc, giao thức gốc)
+Tốc độ thực tế khoảng 0.15–0.2 clip/s mỗi GPU T4, tức mỗi nửa val (khoảng 4650 clip) mất khoảng 4 giờ trên 2×T4.
 
-`scripts/slim_checkpoint.py` chỉ giữ target encoder và predictor ở fp16 (khoảng 2 GB), để 2 process eval vừa RAM của Kaggle.
+| | clean | official | bài báo |
+|---|---|---|---|
+| ViT-g/384, probe Meta (9248 clip) | 38.02 | **39.03** | 39.7 |
+| ViT-g/384, sau khi chỉnh (cross-fit 2 fold) | 42.78 | **43.94** | |
+| mức tăng (clean) [95% CI] | **+4.76** [+3.79, +5.63] | | |
+
+- ViT-g kém bài báo 0.7 điểm, xấp xỉ 1 độ lệch chuẩn bootstrap. Nguyên nhân có thể là fp16 trên T4 so với bf16 trong bài báo. ViT-L thì
+  ra đúng 32.71.
+- Độ bền: cross-fit 5 fold cho 43.76, leave-one-participant-out cho 43.84; tham số cố định τ=0.5, β=1.0 cho 44.21, τ=0.3, β=0.5 cho 44.19
+  (official). τ chọn được 0.3–0.6, β chọn được 0.5–1, gần như giống ViT-L.
+- Chỉ dùng logit adjustment: 39.82 / 40.37. Verb +14.1 (74.6 / 78.1), noun +5.7 (61.5 / 60.8).
+- **Kết luận:** cách chỉnh có tác dụng trên cả hai model. ViT-L (300M tham số) sau khi chỉnh đạt **39.3**, ngang ViT-g (1B tham số) chưa
+  chỉnh (39.0). ViT-g sau khi chỉnh đạt **43.9**.
+
+| model | probe Meta (official) | sau khi chỉnh | mức tăng clean |
+|---|---|---|---|
+| ViT-L/256 | 32.69 | 39.27 | +6.30 |
+| ViT-g/384 | 39.03 | 43.94 | +4.76 |
