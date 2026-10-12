@@ -84,6 +84,34 @@ def grid(task):
     return [(t, b) for t, b in itertools.product(TAUS, BETAS if task == "action" else [0.0])]
 
 
+def load_inputs(work_dir, train_csv, logits_dir, num_folds=2):
+    """Logits of the evaluated, decodable val clips plus everything needed to score and re-score them."""
+    clips = pd.read_csv(os.path.join(work_dir, "val_clips.csv"))
+    with open(os.path.join(work_dir, "classes.json")) as f:
+        classes = json.load(f)
+    n_cls = dict(verb=len(classes["verbs"]), noun=len(classes["nouns"]), action=len(classes["actions"]))
+    prior = class_priors(train_csv, classes)
+    a_v, a_n = action_verb_noun(classes)
+    lg = load_logits(logits_dir)
+    failed = set()
+    for f in glob.glob(os.path.join(logits_dir, "shard*", "failed.json")):
+        with open(f) as fh:
+            failed |= set(json.load(fh))
+    anchor = os.path.basename(os.path.normpath(logits_dir)).split("__")[0]
+    col = f"expected_fail_{anchor}"
+    skipped = failed | (set(clips.clip_id[clips[col]]) if col in clips else set())
+    keep = np.isin(lg["clip_id"], clips.clip_id.values) & ~np.isin(lg["clip_id"], list(skipped))
+    lg = {k: (v[keep] if k == "clip_id" else v[keep].astype(np.float32)) for k, v in lg.items()}
+    c = clips.set_index("clip_id").loc[lg["clip_id"]]
+    c = c.assign(participant=c.video_id.str.split("_").str[0])
+    labels = {k: c[f"{k}_idx"].values for k in TASKS}
+    folds = participant_folds(c, num_folds)
+    counts = official_eval_multiplicity(clips, 64, 2, 2, skipped=skipped)
+    w = np.array([counts.get(int(i), 0) for i in lg["clip_id"]], dtype=np.float64)
+    return dict(classes=classes, n_cls=n_cls, prior=prior, a_v=a_v, a_n=a_n, lg=lg, labels=labels, clips_val=c,
+                folds=folds, w=w)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--work_dir", required=True)
@@ -94,32 +122,13 @@ def main():
     p.add_argument("--bootstrap", type=int, default=1000)
     args = p.parse_args()
 
-    clips = pd.read_csv(os.path.join(args.work_dir, "val_clips.csv"))
-    with open(os.path.join(args.work_dir, "classes.json")) as f:
-        classes = json.load(f)
-    n_cls = dict(verb=len(classes["verbs"]), noun=len(classes["nouns"]), action=len(classes["actions"]))
-    prior = class_priors(args.train_csv, classes)
-    a_v, a_n = action_verb_noun(classes)
-
-    lg = load_logits(args.logits_dir)
-    failed = set()
-    for f in glob.glob(os.path.join(args.logits_dir, "shard*", "failed.json")):
-        with open(f) as fh:
-            failed |= set(json.load(fh))
-    anchor = os.path.basename(os.path.normpath(args.logits_dir)).split("__")[0]
-    col = f"expected_fail_{anchor}"
-    skipped = failed | (set(clips.clip_id[clips[col]]) if col in clips else set())
-    keep = np.isin(lg["clip_id"], clips.clip_id.values) & ~np.isin(lg["clip_id"], list(skipped))
-    lg = {k: (v[keep] if k == "clip_id" else v[keep].astype(np.float32)) for k, v in lg.items()}
-    c = clips.set_index("clip_id").loc[lg["clip_id"]]
-    c = c.assign(participant=c.video_id.str.split("_").str[0])
-    labels = {k: c[f"{k}_idx"].values for k in TASKS}
-    folds = participant_folds(c, args.num_folds)
+    d = load_inputs(args.work_dir, args.train_csv, args.logits_dir, args.num_folds)
+    n_cls, prior, a_v, a_n, lg, labels, folds, w = (d[k] for k in ("n_cls", "prior", "a_v", "a_n", "lg", "labels",
+                                                                    "folds", "w"))
+    c = d["clips_val"]
     n_part = c.participant.nunique()
     schemes = {f"{args.num_folds}_folds": folds, "5_folds": participant_folds(c, min(5, n_part)),
                f"leave_one_participant_out_{n_part}": participant_folds(c, n_part)}
-    counts = official_eval_multiplicity(clips, 64, 2, 2, skipped=skipped)
-    w = np.array([counts.get(int(i), 0) for i in lg["clip_id"]], dtype=np.float64)
 
     def recall(hits, sel=slice(None), task="action", weights=None):
         return mean_class_recall(hits[sel], labels[task][sel], n_cls[task],

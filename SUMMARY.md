@@ -93,6 +93,7 @@ action thì ghép thêm `β·(log_softmax verb + log_softmax noun)`. τ và β �
 - `summarize_oracle.py`: tính điểm các biến thể oracle với probe đóng băng.
 - `cv_probe.py`: train lại probe với cross-validation theo người tham gia (enc / pred / real / fc).
 - `posthoc_ek100.py`: chỉnh logits bằng logit adjustment và ghép verb–noun, kèm cross-fitting, kiểm tra độ bền và bảng lưới τ×β.
+- `analyze_posthoc.py`: phân tích mức tăng theo nhóm lớp, tỉ lệ ô top-5, prior trong logits, độ hiệu chỉnh, đường recall theo τ, hình.
 - `slim_checkpoint.py`: rút gọn checkpoint V-JEPA 2 (chỉ target encoder và predictor, fp16).
 
 **Config**: `configs/ek100_vitl_inference.yaml` và `configs/ek100_vitg384_inference.yaml` là bản sao config inference gốc của Meta.
@@ -106,9 +107,10 @@ action thì ghép thêm `β·(log_softmax verb + log_softmax noun)`. τ và β �
 - `kaggle_cv_probe`: trích token pool và chạy cross-validation probe.
 - `kaggle_posthoc_ek100`: chỉnh logits (CPU).
 - `kaggle_eval_vitg384`: eval ViT-g/384 (2 phần) rồi chỉnh logits.
+- `kaggle_analysis_ek100`: phân tích cho bài báo (CPU), dùng logits của ViT-L và ViT-g.
 
 **Tài liệu và test**: `results/verify_ek100_vitl.md`, `results/predictor_oracle.md`, `docs/protocol_notes.md`, `docs/PLAN.md`, `README.md`.
-`tests/` có 14 test, tất cả đều pass.
+`tests/` có 15 test, tất cả đều pass.
 
 ## 5. Kế hoạch chạy trên Kaggle (đã chạy, theo thứ tự)
 
@@ -136,6 +138,9 @@ Lưu ý Kaggle:
 - τ và β được chọn trên val (dù có cross-fitting). Chưa đo trên test set chính thức (server challenge EK100).
 - So sánh với các phương pháp khác chỉ công bằng khi áp cùng cách chỉnh cho chúng.
 - ViT-g kém bài báo 0.7 điểm (39.03 so với 39.7). Nguyên nhân có thể là fp16 so với bf16, chưa kiểm tra.
+
+**Đã biết thêm:** probe của Meta được train bằng sigmoid focal loss (α=0.25, γ=2; `use_focal_loss: true` trong config
+EK100 của vjepa2), không phải softmax cross-entropy mà lý thuyết logit adjustment (τ=1) giả định.
 
 **Vấn đề mở:**
 - Vì sao τ=1 thất bại, tức là logits của probe không được hiệu chỉnh đúng như xác suất. Cần phân tích.
