@@ -142,8 +142,13 @@ Lưu ý Kaggle:
 **Đã biết thêm:** probe của Meta được train bằng sigmoid focal loss (α=0.25, γ=2; `use_focal_loss: true` trong config
 EK100 của vjepa2), không phải softmax cross-entropy mà lý thuyết logit adjustment (τ=1) giả định.
 
+**Phân tích đã làm** (`kaggle_analysis_ek100`): mức tăng là sự **đánh đổi**. Lớp phổ biến (>100 mẫu train) mất 3–6 điểm, lớp hiếm (<20 mẫu
+train, chiếm 61% số lớp) tăng 3.7–9.1 điểm. Logit adjustment giúp lớp hiếm, ghép verb–noun giúp lớp phổ biến và lớp trung bình. Logits action
+chỉ chứa khoảng 0.2–0.27 lần log prior (do sigmoid focal loss), và τ tốt nhất khi chỉ dùng logit adjustment (khoảng 0.2) gần bằng con số đó.
+Đây là lý do τ=1 thất bại. Chi tiết ở `results/predictor_oracle.md`.
+
 **Vấn đề mở:**
-- Vì sao τ=1 thất bại, tức là logits của probe không được hiệu chỉnh đúng như xác suất. Cần phân tích.
+- Accuracy theo từng clip có thể giảm sau khi chỉnh (lớp phổ biến mất điểm). Chưa đo trực tiếp.
 - Hướng predictor chỉ có thể có lợi ở quy mô tập train, với mục tiêu khác cosine. Hiện chưa được kiểm chứng.
 
 **Việc tiếp theo (đang chờ thầy quyết):**

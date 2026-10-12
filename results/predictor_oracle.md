@@ -210,3 +210,35 @@ Action recall@5 trung bình mỗi lớp. Nhóm lớp theo số lần xuất hi�
 số lớp, nên mean-class recall tăng. Ghép verb–noun làm cách chỉnh bền với τ: head verb và head noun có ít lớp hơn và nhiều mẫu hơn cho mỗi
 lớp, nên chúng cung cấp thêm bằng chứng cho các action hiếm. Các số về prior trong logits, ECE và tỉ lệ ô top-5 xem trong `analysis.md`
 (output của notebook).
+
+### Phân tích chi tiết (`analysis.md`, clean, cross-fit 2 fold)
+Action, từng thành phần đóng góp. Ở các cột 2–5, mỗi ô ghi many / medium / few; 2 cột cuối là tỉ lệ ô top-5 của nhóm few:
+
+| | probe Meta | chỉ logit adj. | chỉ ghép verb–noun | cả hai | top-5 few (Meta → cả hai) | nhãn val few |
+|---|---|---|---|---|---|---|
+| ViT-L gốc | 69.3 / 41.5 / 19.4 | 63.5 / 42.7 / 24.6 | 71.3 / 45.9 / 20.5 | 64.8 / 46.2 / 28.5 | 13.1% → 33.3% | 17.2% |
+| ViT-L `action_start` | 40.3 / 18.7 / 7.9 | 35.1 / 19.7 / 9.9 | 40.2 / 19.5 / 8.3 | 33.9 / 21.2 / 11.6 | 12.0% → 28.5% | 17.2% |
+| ViT-g gốc | 74.5 / 49.1 / 26.1 | 70.1 / 48.2 / 30.3 | 76.1 / 51.3 / 27.4 | 71.3 / 52.3 / 33.1 | 15.9% → 31.5% | 17.2% |
+
+Prior của tập train nằm sẵn trong logits (độ dốc của logit trung bình mỗi lớp theo log prior, r), và hiệu chỉnh top-1 (ECE; độ tự tin so
+với accuracy):
+
+| | action | verb | noun |
+|---|---|---|---|
+| ViT-L gốc | 0.261 (r 0.52); ECE 0.073; 0.342 / 0.343 | 0.470 (r 0.86); 0.149; 0.446 / 0.588 | 0.491 (r 0.87); 0.090; 0.396 / 0.470 |
+| ViT-L `action_start` | 0.268 (r 0.53); ECE 0.209; 0.330 / 0.121 | 0.466; 0.161; 0.433 / 0.272 | 0.491; 0.120; 0.383 / 0.263 |
+| ViT-g gốc | 0.198 (r 0.42); ECE 0.075; 0.365 / 0.391 | 0.501 (r 0.88); 0.129; 0.478 / 0.605 | 0.477 (r 0.86); 0.096; 0.440 / 0.524 |
+
+**Kết luận phân tích:**
+1. **Hai thành phần bổ sung cho nhau.** Logit adjustment chủ yếu giúp lớp hiếm (few +4 đến +5) nhưng làm mất lớp phổ biến. Ghép verb–noun
+   chủ yếu giúp lớp phổ biến và lớp trung bình (+1.5 đến +4.5), lớp hiếm tăng ít. Kết hợp cả hai thì lớp hiếm tăng mạnh nhất (+3.7 đến +9.1),
+   còn lớp phổ biến mất ít hơn so với chỉ dùng logit adjustment ở ViT-g.
+2. **Vì sao τ=1 thất bại:** probe được train bằng sigmoid focal loss, nên logits action chỉ chứa khoảng **0.2–0.27 lần log prior** (độ dốc),
+   không phải 1 lần như lý thuyết softmax giả định. τ tốt nhất khi chỉ dùng logit adjustment là khoảng 0.2, **gần đúng bằng độ dốc này**. Tức
+   là cách chỉnh tốt nhất chỉ trừ đi đúng phần prior đã nằm trong logits. τ=1 trừ gấp khoảng 4–5 lần, nên phạt lớp phổ biến quá tay (recall
+   giảm còn 16 / 7 / 21). Với verb và noun, độ dốc khoảng 0.47–0.50 và τ chọn được 0.2–0.4: cùng chiều nhưng không khớp chặt bằng action.
+3. **Sau khi chỉnh, lớp hiếm chiếm khoảng 30% số ô top-5** (trước đó 12–16%), nhiều hơn tỉ lệ nhãn của chúng (17.2%). Điều này hợp lý vì
+   mean-class recall đánh trọng số đều theo lớp, mà lớp hiếm chiếm 61% số lớp. Nhưng cũng có nghĩa là accuracy theo từng clip có thể giảm:
+   phải nói rõ trong bài.
+4. **Độ hiệu chỉnh:** ở giao thức gốc, action top-1 được hiệu chỉnh tốt (độ tự tin ≈ accuracy, ECE khoảng 0.07). Verb và noun thì thiếu
+   tự tin (0.45 so với 0.59). Ở `action_start`, action quá tự tin (0.33 so với 0.12, ECE 0.21).
