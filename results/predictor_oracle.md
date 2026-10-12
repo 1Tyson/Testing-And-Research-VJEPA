@@ -190,3 +190,23 @@ Tốc độ thực tế khoảng 0.15–0.2 clip/s mỗi GPU T4, tức mỗi n�
 |---|---|---|---|
 | ViT-L/256 | 32.69 | 39.27 | +6.30 |
 | ViT-g/384 | 39.03 | 43.94 | +4.76 |
+
+## Phân tích theo nhóm lớp (`kaggle_analysis_ek100`, clean, cross-fit 2 fold)
+Action recall@5 trung bình mỗi lớp. Nhóm lớp theo số lần xuất hiện trong train: many > 100 (127 lớp có trong val), medium 20–100
+(306 lớp), few < 20 (676 lớp; 677 ở `action_start`). Mỗi ô ghi probe Meta → sau khi chấm lại (cả logit adjustment lẫn ghép verb–noun):
+
+| | many | medium | few |
+|---|---|---|---|
+| ViT-L, giao thức gốc | 69.3 → 64.8 (−4.5) | 41.4 → 46.2 (+4.8) | 19.4 → 28.5 (**+9.1**) |
+| ViT-L, `action_start` | 40.3 → 33.9 (−6.4) | 18.7 → 21.2 (+2.5) | 7.9 → 11.6 (**+3.7**) |
+| ViT-g, giao thức gốc | 74.5 → 71.3 (−3.2) | 49.1 → 52.3 (+3.2) | 26.1 → 33.1 (**+7.0**) |
+
+Đường recall theo τ (action, clean), đọc từ hình:
+- Chỉ logit adjustment (β=0): đỉnh ở τ≈0.2 (ViT-L gốc khoảng 34, `action_start` khoảng 15.9, ViT-g khoảng 40.3), sau đó giảm nhanh. Tại τ=1 chỉ
+  còn khoảng 16 / 7 / 21, thấp hơn hẳn probe Meta.
+- Có ghép verb–noun (β=0.5): đỉnh ở τ≈0.4–0.6 và đường phẳng hơn nhiều. Tại τ=1 vẫn còn khoảng 31 / 13.7 / 41.5.
+
+**Đọc kết quả:** đây là một sự **đánh đổi**. Lớp phổ biến mất 3–6 điểm, còn lớp trung bình và lớp hiếm được nhiều hơn. Lớp hiếm chiếm 61%
+số lớp, nên mean-class recall tăng. Ghép verb–noun làm cách chỉnh bền với τ: head verb và head noun có ít lớp hơn và nhiều mẫu hơn cho mỗi
+lớp, nên chúng cung cấp thêm bằng chứng cho các action hiếm. Các số về prior trong logits, ECE và tỉ lệ ô top-5 xem trong `analysis.md`
+(output của notebook).
