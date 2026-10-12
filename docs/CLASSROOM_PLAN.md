@@ -50,6 +50,18 @@ chỉ cần vài ví dụ để đánh giá. Có thể là đóng góp nghiên c
 5. Gán nhãn tập kiểm tra nhỏ từ camera thật; đo mức tụt điểm khi chuyển miền.
 6. Thử hướng C (surprise của predictor) trên cùng video.
 
+## Trạng thái
+
+Bước 1–3 đã có code, chạy bằng `notebooks/kaggle_sav_vjepa.ipynb` (Kaggle 2×T4, Internet On):
+- `scripts/sav_download.py`: annotation từ Google Drive, video gốc qua link của tác giả (yt-dlp), cắt clip 3 giây như `cut_videos.sh`.
+- `scripts/sav_extract.py`: V-JEPA 2 đóng băng chạy trên toàn khung hình (16 frame, bước 4, cạnh ngắn 256), mỗi người lấy 9 token
+  bằng RoIAlign (lưới 2×2, max trong khung, 4 đoạn thời gian) + 2 token ngữ cảnh của khung hình. Encode cả khung người GT và khung
+  người do detector của tác giả phát hiện trên val.
+- `scripts/sav_train.py`: head `linear` (giống RoI head của mmaction) và `tokens` (transformer nhỏ), 3 seed, frame mAP@0.5 theo
+  `ava_eval` của repo SAV, với khung GT và với khung phát hiện (giao thức của bài báo, 67.9 mAP với VideoMAE-B fine-tune).
+
+Chưa biết trước: link video của tác giả còn tải được bao nhiêu phần trăm. Notebook in ra tỉ lệ này ở bước 2.
+
 ## 5. Quyền riêng tư
 
 Đối tượng là học sinh, thường là trẻ vị thành niên. Cần sự đồng ý của nhà trường và phụ huynh, tuân theo Nghị định 13/2023/NĐ-CP về bảo vệ dữ liệu

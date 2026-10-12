@@ -6,6 +6,11 @@ Kiểm chứng và nghiên cứu cải tiến **V-JEPA 2** cho bài toán action
 - Mục tiêu 2: cải tiến phần phía trên encoder đã pretrain. Xem [docs/PLAN.md](docs/PLAN.md).
 - Chi tiết giao thức và những điểm dễ gây lệch: [docs/protocol_notes.md](docs/protocol_notes.md).
 
+## Hướng mới: hành động học sinh trong lớp học (SAV)
+Kế hoạch: [docs/CLASSROOM_PLAN.md](docs/CLASSROOM_PLAN.md). Chạy [notebooks/kaggle_sav_vjepa.ipynb](notebooks/kaggle_sav_vjepa.ipynb)
+(GPU T4 x2, Internet On): tải SAV, trích đặc trưng V-JEPA 2 cho từng học sinh, train head, báo frame mAP@0.5.
+Code ở `src/classroom/` và `scripts/sav_*.py`.
+
 ## Chạy trên Kaggle
 **Dùng [notebooks/kaggle_eval_ek100_original.ipynb](notebooks/kaggle_eval_ek100_original.ipynb)**: notebook này tải
 **video gốc** EK100 từ Bristol, eval ngay trên 2×T4, rồi xóa (không cần dataset video, có resume qua nhiều phiên).
