@@ -5,3 +5,4 @@ work/
 logits/
 *.pt
 *.npz
+translations/

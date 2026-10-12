@@ -5,6 +5,7 @@ Kiểm chứng và nghiên cứu cải tiến **V-JEPA 2** cho bài toán action
 - Mục tiêu 1: tái tạo **32.7 mean-class Recall@5 (action)** của ViT-L/16 256px bằng probe do Meta phát hành.
 - Mục tiêu 2: cải tiến phần phía trên encoder đã pretrain. Xem [docs/PLAN.md](docs/PLAN.md).
 - Chi tiết giao thức và những điểm dễ gây lệch: [docs/protocol_notes.md](docs/protocol_notes.md).
+- Dự án phụ: [paper_translator/](paper_translator/README.md) dịch paper arXiv (LaTeX) sang tiếng Việt bằng model chạy local.
 
 ## Chạy trên Kaggle
 **Dùng [notebooks/kaggle_eval_ek100_original.ipynb](notebooks/kaggle_eval_ek100_original.ipynb)**: notebook này tải
