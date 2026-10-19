@@ -13,6 +13,10 @@ Shard the work over sessions / accounts with --shard_id/--num_shards; a session 
 
 python scripts/reencode_ek100.py --split val --annotations_dir ek100-ann --out_dir out/ek100_292 \
     --tmp_dir /kaggle/tmp/raw --shard_id 0 --num_shards 2
+
+Train copy for the classifier-head study (direction 2): the EK100 extension videos (55.7% of train segments) are also
+on a Hugging Face mirror, so they can be done while data.bris.ac.uk is down:
+python scripts/reencode_ek100.py --split train --video_kind extension --source hf --crf 18 --pix_fmt yuv420p ...
 """
 
 import argparse
@@ -30,7 +34,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from stream_eval_ek100 import fetch  # noqa: E402
+from stream_eval_ek100 import fetch, is_extension_video  # noqa: E402
 
 
 MANIFEST_COLS = ["video_id", "split", "ok", "mbps", "frames_written", "filled_frames", "filled_ranges", "src_fps",
@@ -179,6 +183,10 @@ def main():
     p.add_argument("--max_hours", type=float, default=11.0)
     p.add_argument("--max_output_gb", type=float, default=19.0, help="Kaggle keeps at most 20 GB of output")
     p.add_argument("--copy_from", default=None, help="take originals from a local folder (testing)")
+    p.add_argument("--source", choices=["bristol", "hf", "auto"], default="bristol",
+                   help="hf: Hugging Face mirror (extension videos only); auto: mirror first, then Bristol")
+    p.add_argument("--video_kind", choices=["all", "extension", "ek55"], default="all",
+                   help="extension: videos recorded for EK100 (P01_101...); ek55: the older ones (P01_01...)")
     args = p.parse_args()
 
     t_start = time.time()
@@ -203,6 +211,8 @@ def main():
         with open(args.videos_file) as f:
             keep = set(f.read().split())
         vids = [x for x in vids if x[0] in keep]
+    if args.video_kind != "all":
+        vids = [x for x in vids if is_extension_video(x[0]) == (args.video_kind == "extension")]
     vids = vids[args.shard_id :: args.num_shards]
 
     if os.path.exists(manifest_path):  # rewrite with the fixed columns, keeping only finished videos
@@ -220,7 +230,7 @@ def main():
         f"{len(todo)} to go (~{vi.loc[[v for v, _ in todo], 'duration'].sum() / 3600:.1f} h of video)")
 
     class FetchArgs:  # what stream_eval_ek100.fetch needs
-        copy_from, connections, tries = args.copy_from, args.connections, args.tries
+        copy_from, connections, tries, source = args.copy_from, args.connections, args.tries, args.source
 
     ready = queue.Queue()
     stop = threading.Event()

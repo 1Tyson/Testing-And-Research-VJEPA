@@ -9,6 +9,10 @@ Resumable (chunked .npz) and shardable across GPUs / Kaggle sessions:
 delete the video afterwards, and exit once `DIR/ALL_DOWNLOADED` exists and nothing is left.
 
 Metrics are computed afterwards by scripts/compute_metrics.py.
+
+--clips_csv train_clips.csv --save_pooled (classifier-head study, docs/DIRECTION2.md): run on the train clips of
+scripts/prepare_train_clips.py, with each clip's own anticipation time / point, and also store the output of the
+released probe's attentive pooler ("pooled", [N, 3, 1024] fp16: the inputs of its verb / noun / action layers).
 """
 
 import argparse
@@ -114,6 +118,7 @@ class ShardWriter:
 
 
 ORACLE_VARIANTS = ("oracle", "enconly", "copylast")
+POOLER_OUT = {}  # filled by a forward hook on probe.pooler with --save_pooled
 
 
 def predict_future(model, x, ats):
@@ -196,6 +201,8 @@ def evaluate(todo, anchor, writers, model, probe, data_cfg, args, device, dtype,
                     continue
                 x = batch["video"].to(device, non_blocking=True)
                 ats = torch.full((x.shape[0],), at, device=device)
+                if "at" in batch and not args.oracle:  # per-clip anticipation time (train views)
+                    ats = batch["at"].to(device)
                 if args.oracle:
                     with torch.autocast(device.type, dtype=dtype, enabled=dtype != torch.float32):
                         outs, extra = oracle_forward(model, probe, x, batch["future"].to(device), ats, grid,
@@ -215,7 +222,11 @@ def evaluate(todo, anchor, writers, model, probe, data_cfg, args, device, dtype,
                     pooled = None
                     if args.save_feats_pool:
                         pooled = pool_tokens(feats, grid, args.save_feats_pool).cpu().numpy().astype(np.float16)
-                    writer.add(batch["clip_id"].numpy(), out, pooled)
+                    extra = None
+                    if args.save_pooled:
+                        extra = dict(pooled=POOLER_OUT["x"].float().cpu().numpy().astype(np.float16),
+                                     at=ats.float().cpu().numpy())
+                    writer.add(batch["clip_id"].numpy(), out, pooled, extra)
                 seen += x.shape[0]
                 if seen % args.save_every < x.shape[0]:
                     rate = seen / (time.time() - t0)
@@ -261,6 +272,10 @@ def main():
                    help="convert annotation frame ids to native fps (29.97/47.95/90 fps videos); not in official code")
     p.add_argument("--decode_fallback", choices=["none", "pyav"], default="none",
                    help="pyav: decode with PyAV the in-range clips decord fails on (the official loader drops them)")
+    p.add_argument("--clips_csv", default="val_clips.csv", help="clip index in --work_dir (train_clips.csv: "
+                   "scripts/prepare_train_clips.py, per-clip anticipation time / point)")
+    p.add_argument("--save_pooled", action="store_true", help="also save the probe's attentive-pooler output "
+                   "[N, 3, D] (verb / noun / action query), for re-training the linear heads")
     p.add_argument("--save_feats_pool", type=int, default=0, help="also save features pooled to PxP per time step "
                    "(with --oracle: also the predicted and the real future tokens)")
     args = p.parse_args()
@@ -272,7 +287,9 @@ def main():
     device = torch.device(args.device)
     dtype = DTYPES[args.dtype]
 
-    clips = pd.read_csv(os.path.join(args.work_dir, "val_clips.csv"))
+    clips = pd.read_csv(os.path.join(args.work_dir, args.clips_csv))
+    if args.oracle and "anticipation_time" in clips:
+        raise SystemExit("--oracle assumes the val setting (one anticipation time for all clips)")
     with open(os.path.join(args.work_dir, "classes.json")) as f:
         classes = json.load(f)
     if args.only_videos:
@@ -305,6 +322,8 @@ def main():
         device=device,
         probe_checkpoint=args.probe_ckpt,
     )
+    if args.save_pooled:
+        probe.pooler.register_forward_hook(lambda m, i, o: POOLER_OUT.__setitem__("x", o))
     stats, crash, t0 = dict(clips=0, fp32_retries=0), None, time.time()
 
     if args.watch_dir is None:

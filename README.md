@@ -24,6 +24,12 @@ Nếu cần kiểm tra một dataset video có phải bản gốc không, chạy
 7. `notebooks/kaggle_analysis_ek100.ipynb` (CPU): phân tích mức tăng theo nhóm lớp, prior nằm sẵn trong logits, độ hiệu chỉnh,
    đường recall theo τ, kèm hình.
 
+### Hướng 2: train lại các lớp phân loại với loss cân bằng lớp + head verb–noun có cấu trúc
+Chi tiết: [docs/DIRECTION2.md](docs/DIRECTION2.md). Chạy theo thứ tự:
+1. `notebooks/kaggle_reencode_train_hf.ipynb` (CPU): bản sao 292p của tập train. Phần mở rộng EK100 lấy từ Hugging Face.
+2. `notebooks/kaggle_extract_pooled.ipynb` (2×T4): đầu ra pooler của probe Meta cho train và val (`eval_ek100.py --save_pooled`).
+3. `notebooks/kaggle_train_head.ipynb` (1×T4): `scripts/train_head.py`, các recipe × 3 seed, so với probe Meta và với cách chỉnh post-hoc.
+
 ### Notebook cũ (dùng với dataset video có sẵn)
 Mở [notebooks/kaggle_verify_ek100.ipynb](notebooks/kaggle_verify_ek100.ipynb) (GPU T4 x2, Internet On).
 Notebook `git clone` repo này, nên repo phải để **public**, hoặc upload repo lên Kaggle dưới dạng dataset.

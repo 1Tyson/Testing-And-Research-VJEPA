@@ -28,13 +28,26 @@ import pandas as pd
 
 EK55_BASE = "https://data.bris.ac.uk/datasets/3h91syskeag572hl6tvuovwv4d/videos"
 EK100_EXT_BASE = "https://data.bris.ac.uk/datasets/2g1n6qdydwa9u22shpxqzp0t8m"
+# Public mirror of the EK100 *extension* videos only (P01_101 ...; no EK55 video such as P01_11, so no val video).
+# fetch() checks every file against EPIC_100_video_info.csv (fps, duration, resolution), whatever its source.
+HF_EXT_BASE = "https://huggingface.co/datasets/awsaf49/epic_kitchens_100/resolve/main"
 
 
-def url_candidates(video_id):
-    pid, num = video_id.split("_")
-    if len(num) == 3:  # recorded for the EK100 extension
-        return [f"{EK100_EXT_BASE}/{pid}/videos/{video_id}.MP4"]
-    return [f"{EK55_BASE}/test/{pid}/{video_id}.MP4", f"{EK55_BASE}/train/{pid}/{video_id}.MP4"]
+def is_extension_video(video_id):
+    return len(video_id.split("_")[1]) == 3
+
+
+def url_candidates(video_id, source="bristol"):
+    """source: bristol (official server), hf (mirror, extension videos only), auto (mirror first, then Bristol)."""
+    pid, _ = video_id.split("_")
+    bristol = ([f"{EK100_EXT_BASE}/{pid}/videos/{video_id}.MP4"] if is_extension_video(video_id) else
+               [f"{EK55_BASE}/test/{pid}/{video_id}.MP4", f"{EK55_BASE}/train/{pid}/{video_id}.MP4"])
+    hf = [f"{HF_EXT_BASE}/{pid}/videos/{video_id}.MP4"] if is_extension_video(video_id) else []
+    if source == "hf":
+        return hf
+    if source == "auto":
+        return hf + bristol
+    return bristol
 
 
 def done_clip_ids(anchor_dir):
@@ -89,7 +102,7 @@ def fetch(video_id, dest, ref, args, log):
             if src:
                 shutil.copy(src[0], dest)
         else:
-            for url in url_candidates(video_id):
+            for url in url_candidates(video_id, getattr(args, "source", "bristol")):
                 for p in (dest, dest + ".aria2"):
                     if os.path.exists(p):
                         os.remove(p)
@@ -128,6 +141,8 @@ def main():
     p.add_argument("--tries", type=int, default=3)
     p.add_argument("--max_hours", type=float, default=10.5, help="stop starting new downloads after this")
     p.add_argument("--copy_from", default=None, help="take videos from a local folder instead of downloading")
+    p.add_argument("--source", choices=["bristol", "hf", "auto"], default="bristol",
+                   help="where to download originals from (hf: mirror of the extension videos only)")
     p.add_argument("--videos_file", default=None, help="only these video_ids (one per line)")
     p.add_argument("--retry_failed", action="store_true",
                    help="re-download and re-evaluate clips that failed to decode (not the windows past the video end)")
