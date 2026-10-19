@@ -41,7 +41,7 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.path.insert(0, os.path.dirname(__file__))
 from cv_probe import participant_folds  # noqa: E402
-from posthoc_ek100 import grid, load_inputs, score  # noqa: E402
+from posthoc_ek100 import grid, load_inputs, log_softmax  # noqa: E402
 from vjepa_ek100.metrics import mean_class_recall, topk_hits  # noqa: E402
 
 TASKS = ("verb", "noun", "action")  # = order of the pooler queries in AttentiveClassifier
@@ -224,9 +224,16 @@ def evaluate(lg, d, boot_reps=0, ref=None, rng=None):
     """lg: {task: [N, C]} aligned with d['labels']. Raw and cross-fitted post-hoc scores (clean / official)."""
     labels, n_cls, w, folds = d["labels"], d["n_cls"], d["w"], d["folds"]
     res, hits_out = {}, {}
+    # same scores as posthoc_ek100.score, with the log-softmaxes computed once instead of once per grid point
+    s_act = log_softmax(lg["action"])
+    s_vn = log_softmax(lg["verb"])[:, d["a_v"]] + log_softmax(lg["noun"])[:, d["a_n"]]
     for task in TASKS:
-        hits_by = {tb: topk_hits(score(task, lg, d["prior"], d["a_v"], d["a_n"], *tb), labels[task])
-                   for tb in grid(task)}
+        def scored(tau, beta):
+            if task != "action":
+                return lg[task] - tau * d["prior"][task]
+            return (s_act + beta * s_vn if beta else s_act) - tau * d["prior"]["action"]
+
+        hits_by = {tb: topk_hits(scored(*tb), labels[task]) for tb in grid(task)}
 
         def rec(h, sel=slice(None), weights=None):
             return mean_class_recall(h[sel], labels[task][sel], n_cls[task],
