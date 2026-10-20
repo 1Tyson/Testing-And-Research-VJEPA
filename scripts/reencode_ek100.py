@@ -245,12 +245,23 @@ def main():
             return "output size budget"
         return None
 
+    # At most --max_raw_on_disk originals exist at a time (downloading, queued or being encoded). A slot is taken
+    # before a download starts and given back once its file is deleted. (Checking the queue length before
+    # pool.submit does not limit anything: the submit loop finishes at once, so with a fast source every
+    # video would be downloaded long before it is encoded.)
+    slots = threading.Semaphore(args.max_raw_on_disk)
+
     def downloader():
         with ThreadPoolExecutor(args.parallel_downloads) as pool:
             for vid, sp in todo:
-                while ready.qsize() >= args.max_raw_on_disk and not stop.is_set():
-                    time.sleep(5)
-                if stop.is_set() or budget_left():
+                got = False
+                while not stop.is_set():
+                    if slots.acquire(timeout=5):
+                        got = True
+                        break
+                if not got or budget_left():
+                    if got:
+                        slots.release()
                     break
                 raw = os.path.join(args.tmp_dir, f"{vid}.MP4")
                 ref = vi.loc[vid] if vid in vi.index else None
@@ -263,6 +274,7 @@ def main():
                     else:
                         log(f"[FAIL download] {vid}")
                         append_manifest(dict(video_id=vid, split=sp, ok=False, error="download failed"))
+                        slots.release()
 
                 pool.submit(job)
         ready.put(None)
@@ -282,6 +294,7 @@ def main():
             if stop.is_set():  # budget reached: drop what is still queued
                 if os.path.exists(raw):
                     os.remove(raw)
+                slots.release()
                 continue
             dst = os.path.join(args.out_dir, vid.split("_")[0], "videos", f"{vid}.MP4")
             row = dict(video_id=vid, split=sp)
@@ -303,6 +316,7 @@ def main():
             finally:
                 if os.path.exists(raw):
                     os.remove(raw)
+                slots.release()
             append_manifest(row)
             why = budget_left()
             if why:
