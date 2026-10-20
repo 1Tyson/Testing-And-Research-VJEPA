@@ -27,6 +27,7 @@ Nếu cần kiểm tra một dataset video có phải bản gốc không, chạy
 ### Hướng 2: train lại các lớp phân loại với loss cân bằng lớp + head verb–noun có cấu trúc
 Chi tiết: [docs/DIRECTION2.md](docs/DIRECTION2.md). Chạy theo thứ tự:
 1. `notebooks/kaggle_reencode_train_hf.ipynb` (CPU): bản sao 292p của tập train. Phần mở rộng EK100 lấy từ Hugging Face.
+   Bản val 292p (`ek100-292-val-0/1`, chỉ tải được từ Bristol): `notebooks/kaggle_reencode_val.ipynb` (CPU, cùng mức nén với train).
 2. `notebooks/kaggle_extract_pooled.ipynb` (2×T4): đầu ra pooler của probe Meta cho train và val (`eval_ek100.py --save_pooled`).
 3. `notebooks/kaggle_train_head.ipynb` (1×T4): `scripts/train_head.py`, các recipe × 3 seed, so với probe Meta và với cách chỉnh post-hoc.
 
