@@ -40,6 +40,42 @@ Mean-class R@5, mean ± std qua 3 seed, mỗi ô ghi clean / official. "+ post-h
   head học thuộc các mẫu hiếm (mỗi lớp hiếm chỉ có vài clip, bị lặp lại nhiều lần).
 - `compose` chỉ có ích khi đi cùng loss cân bằng (`focal+compose` ≈ `focal`).
 
+## Tách đóng góp (`action_start`, lần chạy 2)
+
+Cùng dữ liệu, cùng giao thức. Action R@5 clean, mean ± std qua 3 seed; cột "holdout" = action R@5 trên 2 người tham gia của **train**
+được giữ lại (không bao giờ nhìn val).
+
+| recipe | loss (τ) | ghép verb–noun | khởi tạo | action (val) | + post-hoc | verb | holdout (train) |
+|---|---|---|---|---|---|---|---|
+| meta | focal (Meta) | | | 14.10 | 16.80 | 27.43 | 34.38* |
+| ce+compose | CE | có | Meta | 12.65±0.24 | 17.06 | 20.01 | 15.87 |
+| la | LA, τ = 0.5 | | Meta | 13.39±0.64 | 17.14 | 31.77 | 16.67 |
+| bsm | BSM, τ = 1 | | Meta | 15.87±0.32 | 17.30 | 44.00 | 20.05 |
+| la+compose | LA, τ = 0.5 | có | Meta | 16.53±0.26 | 17.59 | 32.64 | 21.49 |
+| **bsm+compose** | BSM, τ = 1 | có | Meta | **17.53±0.50** | **17.73** | 43.39 | **23.17** |
+| bsm+random | BSM, τ = 1 | | ngẫu nhiên | 10.90±0.11 | 12.57 | 36.77 | 6.01 |
+| bsm+compose+random | BSM, τ = 1 | có | ngẫu nhiên | 10.83±0.37 | 12.49 | 34.80 | 7.18 |
+
+\* Không so được: probe Meta được train trên toàn bộ tập train, gồm cả 2 người được giữ lại. Từ commit sau, `meta` không được chọn trên
+holdout.
+
+**Đọc kết quả:**
+- **Chọn recipe không nhìn val:** trong các head train lại, holdout của train xếp hạng **đúng y hệt** thứ tự trên val
+  (bsm+compose > la+compose > bsm > la > ce+compose > hai bản khởi tạo ngẫu nhiên), và chọn `bsm+compose`. Con số 17.53 vì vậy không
+  phải do chọn recipe trên val.
+- **Cân bằng lớp lúc train là phần lớn nhất:** cùng có ghép, BSM so với CE là +4.9 (17.53 so với 12.65); không ghép, +5.7 (15.87 so với
+  10.13 ở lần chạy 1).
+- **Cân bằng đủ (τ = 1) tốt hơn một nửa (τ = 0.5):** +2.5 không ghép, +1.0 có ghép; verb 44.0 so với 31.8. Ngược với post-hoc trên
+  probe Meta (τ tốt nhất khoảng 0.3): logits của probe Meta (focal loss) chỉ chứa khoảng 0.2–0.27 lần log prior, còn head train bằng
+  softmax CE học đúng 1 lần log prior, nên trừ đi đúng 1 lần (τ = 1, đúng như lý thuyết logit adjustment) là phù hợp.
+- **Ghép verb–noun luôn giúp:** +1.7 (với BSM), +3.1 (với LA), +2.5 (với CE, so với `ce` ở lần chạy 1). Lợi ích lớn hơn khi cân bằng
+  chưa đủ, vì phần ghép tự mang thông tin cho lớp hiếm.
+- **Khởi tạo từ head của Meta là cần thiết:** khởi tạo ngẫu nhiên mất khoảng 6.7 điểm (10.83 so với 17.53). Lưu ý khi diễn giải: head
+  của Meta đã được train trên **toàn bộ** tập train (gồm phần EK55 ta chưa có), nên một phần kết quả là tinh chỉnh lại tri thức đó, không
+  phải học từ 55.7% dữ liệu đang có.
+- Post-hoc sau khi train gần như không thêm gì cho `bsm+compose` (+0.2), nhưng thêm +1.1 cho `la+compose`: phần cân bằng còn thiếu lúc
+  train được bù sau.
+
 ## Giao thức của code Meta `official` (tham khảo; train chỉ có 84% số clip)
 
 | recipe | action | action + post-hoc | verb | noun | CI95 |
@@ -67,6 +103,6 @@ giao thức `official` phải train lại cả pooler (bước 4), hoặc tách 
 
 ## Việc tiếp theo
 
-1. Tách đóng góp: `ce+compose` (chỉ ghép, không cân bằng), `bsm+compose+random` (không khởi tạo từ Meta), `la` với τ = 0.5.
+1. ~~Tách đóng góp~~ (đã làm, xem trên).
 2. Thêm view ngẫu nhiên (augmentation theo config train của Meta), xem `bsm+compose` có tăng tiếp không.
 3. Trích nốt `official` và phần EK55 của train khi có video.

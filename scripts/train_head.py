@@ -449,11 +449,15 @@ def main():
                          for task in TASKS for kind in ("raw", "posthoc") for proto in ("clean", "official")}
     res["summary"] = summary
     # Recipe chosen WITHOUT looking at val: highest mean action recall on the held-out train participants
+    # "meta" is reported but never chosen: the released probe was trained on ALL train clips, the held-out
+    # participants included, so its holdout score is inflated (34 vs ~20 for re-trained heads in our run).
     hold = {n: float(np.mean([s["holdout_action_recall"] for s in r["seeds"]]))
             for n, r in res["recipes"].items() if all(s.get("holdout_action_recall") is not None for s in r["seeds"])}
+    meta_hold = hold.pop("meta", None)
     if hold:
         pick = max(hold, key=hold.get)
-        res["chosen_on_train_holdout"] = dict(recipe=pick, holdout_action_recall=hold, val=summary[pick])
+        res["chosen_on_train_holdout"] = dict(recipe=pick, holdout_action_recall=hold, val=summary[pick],
+                                              meta_holdout_not_comparable=meta_hold)
     res["seconds"] = round(time.time() - t_start, 1)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as f:
@@ -473,7 +477,9 @@ def main():
         print("\nheld-out TRAIN participants, action R@5 (mean over seeds): "
               + ", ".join(f"{n} {v:.2f}" for n, v in sorted(hold.items(), key=lambda kv: -kv[1])))
         v = summary[pick]
-        print(f"recipe chosen on the train holdout (val never looked at): {pick} -> val action "
+        if meta_hold is not None:
+            print(f"(meta {meta_hold:.2f} on the holdout is not comparable: the released probe was trained on those clips)")
+        print(f"recipe chosen on the train holdout among re-trained heads (val never looked at): {pick} -> val action "
               f"{v['action_raw_clean'][0]:.2f} / {v['action_raw_official'][0]:.2f} raw, "
               f"{v['action_posthoc_clean'][0]:.2f} / {v['action_posthoc_official'][0]:.2f} +posthoc")
     print(f"done in {res['seconds'] / 60:.1f} min -> {args.out}")
