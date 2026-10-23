@@ -411,7 +411,11 @@ def main():
         rec = parse_recipe(name)
         print(f"== {name}", flush=True)
         if rec is None:
-            res["recipes"][name] = dict(seeds=[dict(seed=None, **meta_res)])
+            meta_hold = None
+            if init_sd is not None and len(hold_idx):  # the released layers on the held-out train participants
+                meta_hold = holdout_recall(Heads(x.shape[2], n_cls, a_v, a_n, init_sd=init_sd).to(device), x[hold_idx],
+                                           {k: y[k][hold_idx] for k in TASKS}, n_cls, device)
+            res["recipes"][name] = dict(seeds=[dict(seed=None, holdout_action_recall=meta_hold, **meta_res)])
             if args.logits_out:
                 save_logits(args.logits_out, name, args.val_feats, val_ids, meta_lg)
             continue
@@ -422,7 +426,8 @@ def main():
                                         seed, device)
             lg = predict(model, xv, device)
             r, _ = evaluate(lg, d, args.bootstrap if seed == args.seeds[0] else 0, meta_hits, rng)
-            runs.append(dict(seed=seed, seconds=round(time.time() - t0, 1), **extra, **r))
+            hold_best = (max(h["holdout_action_recall"] for h in extra["history"]) if len(hold_idx) else None)
+            runs.append(dict(seed=seed, seconds=round(time.time() - t0, 1), holdout_action_recall=hold_best, **extra, **r))
             if args.logits_out and seed == args.seeds[0]:
                 save_logits(args.logits_out, name, args.val_feats, val_ids, lg)
             a = r["action"]
@@ -443,6 +448,12 @@ def main():
         summary[name] = {f"{task}_{kind}_{proto}": agg(name, task, kind, proto)
                          for task in TASKS for kind in ("raw", "posthoc") for proto in ("clean", "official")}
     res["summary"] = summary
+    # Recipe chosen WITHOUT looking at val: highest mean action recall on the held-out train participants
+    hold = {n: float(np.mean([s["holdout_action_recall"] for s in r["seeds"]]))
+            for n, r in res["recipes"].items() if all(s.get("holdout_action_recall") is not None for s in r["seeds"])}
+    if hold:
+        pick = max(hold, key=hold.get)
+        res["chosen_on_train_holdout"] = dict(recipe=pick, holdout_action_recall=hold, val=summary[pick])
     res["seconds"] = round(time.time() - t_start, 1)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as f:
@@ -458,6 +469,13 @@ def main():
         ci = res["recipes"][name]["seeds"][0]["action"]["raw"].get("minus_meta_clean_ci95")
         print(f"{name:16s} {cell('action_raw'):>17s} {cell('action_posthoc'):>19s} {cell('verb_raw'):>15s} "
               f"{cell('noun_raw'):>15s}  {'' if ci is None else f'[{ci[0]:+.2f}, {ci[1]:+.2f}]'}")
+    if hold:
+        print("\nheld-out TRAIN participants, action R@5 (mean over seeds): "
+              + ", ".join(f"{n} {v:.2f}" for n, v in sorted(hold.items(), key=lambda kv: -kv[1])))
+        v = summary[pick]
+        print(f"recipe chosen on the train holdout (val never looked at): {pick} -> val action "
+              f"{v['action_raw_clean'][0]:.2f} / {v['action_raw_official'][0]:.2f} raw, "
+              f"{v['action_posthoc_clean'][0]:.2f} / {v['action_posthoc_official'][0]:.2f} +posthoc")
     print(f"done in {res['seconds'] / 60:.1f} min -> {args.out}")
 
 
