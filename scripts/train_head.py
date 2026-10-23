@@ -200,7 +200,7 @@ def train_recipe(rec, x, y, train_idx, hold_idx, n_cls, a_v, a_n, log_prior, ini
             loss.backward()
             opt.step()
             sched.step()
-            tot += float(loss) * len(b)
+            tot += loss.item() * len(b)
         h = dict(epoch=ep + 1, loss=tot / n)
         if len(hold_idx):
             h["holdout_action_recall"] = holdout_recall(model, x[hold_idx], {k: y[k][hold_idx] for k in TASKS},
@@ -350,7 +350,7 @@ def main():
     p.add_argument("--lr", type=float, default=1e-4, help="when starting from the released layers")
     p.add_argument("--lr_random", type=float, default=1e-3, help="when starting from random layers")
     p.add_argument("--weight_decay", type=float, default=1e-4)
-    p.add_argument("--la_tau", type=float, default=1.0)
+    p.add_argument("--la_tau", type=float, default=0.5, help="la recipe; la_tau = 1 is exactly bsm")
     p.add_argument("--holdout", type=float, default=0.1, help="share of train participants held out to pick the epoch")
     p.add_argument("--num_folds", type=int, default=2, help="val participant folds for the post-hoc cross-fitting")
     p.add_argument("--bootstrap", type=int, default=300)
