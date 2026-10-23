@@ -84,6 +84,61 @@ def build_val_clips(vdf, verb_classes, noun_classes, action_classes, video_paths
     return df
 
 
+def build_train_clips(tdf, verb_classes, noun_classes, action_classes, video_paths=None, views=1, seed=0,
+                      base_time=1.0, time_range=(0.25, 1.75), point_range=(0.0, 0.25)):
+    """Train clips for re-training heads on frozen features, with per-clip anticipation time / point.
+
+    View 0 of every segment uses the val setting (time `base_time`, point 0). Views 1.. are random draws from the
+    ranges of the official training config (configs/eval/vitl/ek100.yaml: train_anticipation_time_sec [0.25, 1.75],
+    train_anticipation_point [0.0, 0.25]); the point only matters for the "official" anchor.
+
+    Ids are stable: segments are ordered by (video_id, start_frame, narration_id) of the *full* train csv and
+    clip_id = seg_id * views + view, and every view draws from its own generator. So adding videos later (more
+    re-encoded copies) or more views never changes the clips that were already extracted. Clips of videos missing
+    from `video_paths` are dropped (all are kept, with an empty path, when `video_paths` is None).
+    """
+    df = tdf.sort_values(["video_id", "start_frame", "narration_id"], kind="mergesort").reset_index(drop=True)
+    n = len(df)
+    vids = df["video_id"].values
+    video_order = pd.Series(vids).map({v: i for i, v in enumerate(dict.fromkeys(vids))}).values
+    clip_order = df.groupby("video_id").cumcount().values
+    base = pd.DataFrame(dict(
+        seg_id=np.arange(n),
+        narration_id=df["narration_id"].values,
+        participant=df["participant_id"].values if "participant_id" in df else pd.Series(vids).str.split("_").str[0].values,
+        video_id=vids,
+        video_order=video_order,
+        start_frame=df["start_frame"].astype(int).values,
+        stop_frame=df["stop_frame"].astype(int).values,
+        verb_class=df["verb_class"].astype(int).values,
+        noun_class=df["noun_class"].astype(int).values,
+    ))
+    base["verb_idx"] = base.verb_class.map(verb_classes).values
+    base["noun_idx"] = base.noun_class.map(noun_classes).values
+    base["action_idx"] = [action_classes[(v, m)] for v, m in zip(base.verb_class, base.noun_class)]
+    out = []
+    for v in range(views):
+        c = base.copy()
+        if v == 0:
+            c["anticipation_time"], c["anticipation_point"] = float(base_time), 0.0
+        else:
+            rng = np.random.default_rng([seed, v])
+            c["anticipation_time"] = rng.uniform(*time_range, n)
+            c["anticipation_point"] = rng.uniform(*point_range, n)
+        c["view"] = v
+        c["clip_id"] = c.seg_id * views + v
+        c["clip_order"] = clip_order * views + v
+        out.append(c)
+    clips = pd.concat(out).sort_values("clip_id").reset_index(drop=True)
+    if video_paths is None:
+        clips["video_path"] = ""
+    else:
+        clips = clips[clips.video_id.isin(set(video_paths))].copy()
+        clips["video_path"] = clips.video_id.map(video_paths)
+    cols = ["clip_id", "seg_id", "view"] + [c for c in clips.columns if c not in ("clip_id", "seg_id", "view")]
+    return clips[cols].reset_index(drop=True)
+
+
 def clip_frame_indices(
     start_frame,
     stop_frame,

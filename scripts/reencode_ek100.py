@@ -13,6 +13,10 @@ Shard the work over sessions / accounts with --shard_id/--num_shards; a session 
 
 python scripts/reencode_ek100.py --split val --annotations_dir ek100-ann --out_dir out/ek100_292 \
     --tmp_dir /kaggle/tmp/raw --shard_id 0 --num_shards 2
+
+Train copy for the classifier-head study (direction 2): the EK100 extension videos (55.7% of train segments) are also
+on a Hugging Face mirror, so they can be done while data.bris.ac.uk is down:
+python scripts/reencode_ek100.py --split train --video_kind extension --source hf --crf 18 --pix_fmt yuv420p ...
 """
 
 import argparse
@@ -30,7 +34,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from stream_eval_ek100 import fetch  # noqa: E402
+from stream_eval_ek100 import fetch, is_extension_video  # noqa: E402
 
 
 MANIFEST_COLS = ["video_id", "split", "ok", "mbps", "frames_written", "filled_frames", "filled_ranges", "src_fps",
@@ -179,6 +183,10 @@ def main():
     p.add_argument("--max_hours", type=float, default=11.0)
     p.add_argument("--max_output_gb", type=float, default=19.0, help="Kaggle keeps at most 20 GB of output")
     p.add_argument("--copy_from", default=None, help="take originals from a local folder (testing)")
+    p.add_argument("--source", choices=["bristol", "hf", "auto"], default="bristol",
+                   help="hf: Hugging Face mirror (extension videos only); auto: mirror first, then Bristol")
+    p.add_argument("--video_kind", choices=["all", "extension", "ek55"], default="all",
+                   help="extension: videos recorded for EK100 (P01_101...); ek55: the older ones (P01_01...)")
     args = p.parse_args()
 
     t_start = time.time()
@@ -203,6 +211,8 @@ def main():
         with open(args.videos_file) as f:
             keep = set(f.read().split())
         vids = [x for x in vids if x[0] in keep]
+    if args.video_kind != "all":
+        vids = [x for x in vids if is_extension_video(x[0]) == (args.video_kind == "extension")]
     vids = vids[args.shard_id :: args.num_shards]
 
     if os.path.exists(manifest_path):  # rewrite with the fixed columns, keeping only finished videos
@@ -220,7 +230,7 @@ def main():
         f"{len(todo)} to go (~{vi.loc[[v for v, _ in todo], 'duration'].sum() / 3600:.1f} h of video)")
 
     class FetchArgs:  # what stream_eval_ek100.fetch needs
-        copy_from, connections, tries = args.copy_from, args.connections, args.tries
+        copy_from, connections, tries, source = args.copy_from, args.connections, args.tries, args.source
 
     ready = queue.Queue()
     stop = threading.Event()
@@ -235,12 +245,23 @@ def main():
             return "output size budget"
         return None
 
+    # At most --max_raw_on_disk originals exist at a time (downloading, queued or being encoded). A slot is taken
+    # before a download starts and given back once its file is deleted. (Checking the queue length before
+    # pool.submit does not limit anything: the submit loop finishes at once, so with a fast source every
+    # video would be downloaded long before it is encoded.)
+    slots = threading.Semaphore(args.max_raw_on_disk)
+
     def downloader():
         with ThreadPoolExecutor(args.parallel_downloads) as pool:
             for vid, sp in todo:
-                while ready.qsize() >= args.max_raw_on_disk and not stop.is_set():
-                    time.sleep(5)
-                if stop.is_set() or budget_left():
+                got = False
+                while not stop.is_set():
+                    if slots.acquire(timeout=5):
+                        got = True
+                        break
+                if not got or budget_left():
+                    if got:
+                        slots.release()
                     break
                 raw = os.path.join(args.tmp_dir, f"{vid}.MP4")
                 ref = vi.loc[vid] if vid in vi.index else None
@@ -253,6 +274,7 @@ def main():
                     else:
                         log(f"[FAIL download] {vid}")
                         append_manifest(dict(video_id=vid, split=sp, ok=False, error="download failed"))
+                        slots.release()
 
                 pool.submit(job)
         ready.put(None)
@@ -272,6 +294,7 @@ def main():
             if stop.is_set():  # budget reached: drop what is still queued
                 if os.path.exists(raw):
                     os.remove(raw)
+                slots.release()
                 continue
             dst = os.path.join(args.out_dir, vid.split("_")[0], "videos", f"{vid}.MP4")
             row = dict(video_id=vid, split=sp)
@@ -293,6 +316,7 @@ def main():
             finally:
                 if os.path.exists(raw):
                     os.remove(raw)
+                slots.release()
             append_manifest(row)
             why = budget_left()
             if why:

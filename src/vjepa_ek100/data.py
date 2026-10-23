@@ -57,9 +57,16 @@ class EK100ClipDataset(Dataset):
             self._vr_path = None
             return pyav_frames(path, indices, fps), "pyav"
 
+    def clip_anticipation(self, r):
+        """(time, point): per clip when the index has these columns (train views), else the val setting."""
+        at = float(r.anticipation_time) if "anticipation_time" in self.clips else float(self.anticipation_time)
+        ap = float(r.anticipation_point) if "anticipation_point" in self.clips else 0.0
+        return at, ap
+
     def __getitem__(self, i):
         r = self.clips.iloc[i]
         ok, err, decoder, future = True, None, "decord", None
+        at, ap = self.clip_anticipation(r)
         try:
             vr = self._reader(r.video_path)
             fps, n_frames = vr.get_avg_fps(), len(vr)
@@ -67,7 +74,7 @@ class EK100ClipDataset(Dataset):
             def indices(shift=0):
                 return clip_frame_indices(
                     r.start_frame, r.stop_frame, fps, frames_per_clip=self.frames_per_clip, fps=self.fps,
-                    anticipation_time=self.anticipation_time, anticipation_point=0.0, anchor=self.anchor,
+                    anticipation_time=at, anticipation_point=ap, anchor=self.anchor,
                     fix_frame_ids=self.fix_frame_ids, shift_frames=shift,
                 )
 
@@ -83,7 +90,7 @@ class EK100ClipDataset(Dataset):
             ok, err = False, repr(e)[:300]
             self._vr_path = None
             video = torch.zeros(3, self.frames_per_clip, 1, 1)
-        return dict(video=video, future=future, clip_id=int(r.clip_id), ok=ok, err=err, decoder=decoder)
+        return dict(video=video, future=future, clip_id=int(r.clip_id), ok=ok, err=err, decoder=decoder, at=at)
 
 
 def worker_init_fn(_):
@@ -121,6 +128,7 @@ def collate(batch):
         video=torch.stack([b["video"] for b in ok]) if ok else None,
         future=torch.stack([b["future"] for b in ok]) if ok and ok[0]["future"] is not None else None,
         clip_id=torch.tensor([b["clip_id"] for b in ok], dtype=torch.long),
+        at=torch.tensor([b["at"] for b in ok], dtype=torch.float32),
         failed={b["clip_id"]: b["err"] for b in batch if not b["ok"]},
         pyav=[b["clip_id"] for b in ok if b["decoder"] == "pyav"],
     )
