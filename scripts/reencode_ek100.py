@@ -39,7 +39,15 @@ from stream_eval_ek100 import fetch, is_extension_video  # noqa: E402
 
 MANIFEST_COLS = ["video_id", "split", "ok", "mbps", "frames_written", "filled_frames", "filled_ranges", "src_fps",
                  "encode_sec", "src_w", "src_h", "out_w", "out_h", "pad_w", "pad_h", "src_frames", "out_frames",
-                 "out_fps", "src_fps_decord", "error"]
+                 "out_fps", "src_fps_decord", "error", "md5"]
+
+
+def dedupe_manifest(m):
+    """One row per video: the latest successful row if there is one, else the latest row."""
+    m = m.reset_index(drop=True)
+    m["_ok"] = (m.ok.astype(str) == "True").astype(int)
+    m["_i"] = range(len(m))
+    return m.sort_values(["_ok", "_i"]).drop_duplicates("video_id", keep="last").sort_values("_i").drop(columns=["_ok", "_i"])
 
 
 def ffmpeg_exe():
@@ -178,7 +186,10 @@ def main():
     p.add_argument("--ffmpeg_threads", type=int, default=2)
     p.add_argument("--parallel_downloads", type=int, default=2)
     p.add_argument("--connections", type=int, default=8)
-    p.add_argument("--tries", type=int, default=3)
+    p.add_argument("--tries", type=int, default=8, help="download attempts per video (each resumes the last one)")
+    p.add_argument("--redo_filled_over", type=int, default=-1,
+                   help="download again the finished videos with more filled-in frames than this whose md5 was not "
+                        "checked: tells a corrupt original (md5 matches, same result) from a bad download (-1: off)")
     p.add_argument("--max_raw_on_disk", type=int, default=6)
     p.add_argument("--max_hours", type=float, default=11.0)
     p.add_argument("--max_output_gb", type=float, default=19.0, help="Kaggle keeps at most 20 GB of output")
@@ -216,15 +227,22 @@ def main():
     vids = vids[args.shard_id :: args.num_shards]
 
     if os.path.exists(manifest_path):  # rewrite with the fixed columns, keeping only finished videos
-        old = pd.read_csv(manifest_path, dtype=str)
-        old = old[old.ok == "True"].reindex(columns=MANIFEST_COLS)
-        old.to_csv(manifest_path, index=False)
-    done = set()
+        old = pd.read_csv(manifest_path, dtype=str).reindex(columns=MANIFEST_COLS)
+        dedupe_manifest(old[old.ok == "True"]).to_csv(manifest_path, index=False)
+    done, redo, checked = set(), set(), set()
     for m in glob.glob(args.done_glob, recursive=True) + [manifest_path]:
         if os.path.exists(m):
-            d = pd.read_csv(m, dtype=str)
-            done |= set(d.video_id[d.ok == "True"])
-    todo = [x for x in vids if x[0] not in done]
+            d = dedupe_manifest(pd.read_csv(m, dtype=str).reindex(columns=MANIFEST_COLS))
+            d = d[d.ok == "True"]
+            done |= set(d.video_id)
+            if args.redo_filled_over >= 0:
+                filled = pd.to_numeric(d.filled_frames, errors="coerce").fillna(0)
+                redo |= set(d.video_id[(filled > args.redo_filled_over) & (d.md5 != "ok")])
+            checked |= set(d.video_id[d.md5 == "ok"])
+    redo = (redo - checked) & {v for v, _ in vids}
+    todo = [x for x in vids if x[0] not in done or x[0] in redo]
+    if redo:
+        log(f"downloading again to check the md5 ({len(redo)} videos with filled-in frames): {sorted(redo)}")
     vi = pd.read_csv(os.path.join(args.annotations_dir, "EPIC_100_video_info.csv")).set_index("video_id")
     log(f"shard {args.shard_id}/{args.num_shards}: {len(vids)} videos, {len(vids) - len(todo)} already done, "
         f"{len(todo)} to go (~{vi.loc[[v for v, _ in todo], 'duration'].sum() / 3600:.1f} h of video)")
@@ -267,10 +285,11 @@ def main():
                 ref = vi.loc[vid] if vid in vi.index else None
 
                 def job(vid=vid, sp=sp, raw=raw, ref=ref):
-                    t0 = time.time()
-                    if fetch(vid, raw, ref, FetchArgs, log):
-                        log(f"[download] {vid} {os.path.getsize(raw) / 1e9:.2f} GB in {time.time() - t0:.0f}s")
-                        ready.put((vid, sp, raw))
+                    t0, finfo = time.time(), {}
+                    if fetch(vid, raw, ref, FetchArgs, log, finfo):
+                        log(f"[download] {vid} {os.path.getsize(raw) / 1e9:.2f} GB in {time.time() - t0:.0f}s, "
+                            f"md5 {finfo.get('md5', 'unknown')}")
+                        ready.put((vid, sp, raw, finfo.get("md5", "unknown")))
                     else:
                         log(f"[FAIL download] {vid}")
                         append_manifest(dict(video_id=vid, split=sp, ok=False, error="download failed"))
@@ -290,30 +309,31 @@ def main():
             if item is None:
                 ready.put(None)
                 return
-            vid, sp, raw = item
+            vid, sp, raw, md5 = item
             if stop.is_set():  # budget reached: drop what is still queued
                 if os.path.exists(raw):
                     os.remove(raw)
                 slots.release()
                 continue
             dst = os.path.join(args.out_dir, vid.split("_")[0], "videos", f"{vid}.MP4")
-            row = dict(video_id=vid, split=sp)
+            part = dst[:-4] + ".part.mp4"  # an earlier good copy (redo) is only replaced by a verified one
+            row = dict(video_id=vid, split=sp, md5=md5)
             try:
-                info = reencode(raw, dst, args.short_side, args.crf, args.preset, args.ffmpeg_threads, args.pix_fmt)
-                ok, check = verify(raw, dst, info)
+                info = reencode(raw, part, args.short_side, args.crf, args.preset, args.ffmpeg_threads, args.pix_fmt)
+                ok, check = verify(raw, part, info)
+                if ok:
+                    os.replace(part, dst)
                 dur = check["src_frames"] / check["src_fps_decord"]
-                row.update(ok=ok, mbps=round(os.path.getsize(dst) * 8 / 1e6 / dur, 2), **info, **check)
+                row.update(ok=ok, mbps=round(os.path.getsize(dst if ok else part) * 8 / 1e6 / dur, 2), **info, **check)
                 log(f"[{'ok' if ok else 'MISMATCH'}] {vid}: {check['src_frames']} frames, {info['encode_sec']:.0f}s "
-                    f"({dur / max(info['encode_sec'], 1e-6):.1f}x realtime), {os.path.getsize(dst) / 1e9:.2f} GB, "
+                    f"({dur / max(info['encode_sec'], 1e-6):.1f}x realtime), filled {info['filled_frames']}, md5 {md5}, "
                     f"total out {out_gb():.1f} GB")
-                if not ok and os.path.exists(dst):
-                    os.remove(dst)
             except Exception as e:
                 row.update(ok=False, error=repr(e)[:300])
                 log(f"[FAIL encode] {vid}: {e!r}")
-                if os.path.exists(dst):
-                    os.remove(dst)
             finally:
+                if os.path.exists(part):
+                    os.remove(part)
                 if os.path.exists(raw):
                     os.remove(raw)
                 slots.release()
@@ -333,7 +353,8 @@ def main():
     for w in workers:
         w.join()
     if os.path.exists(manifest_path):
-        m = pd.read_csv(manifest_path)
+        m = dedupe_manifest(pd.read_csv(manifest_path, dtype=str).reindex(columns=MANIFEST_COLS))
+        m.to_csv(manifest_path, index=False)
         ok = m.ok.astype(str) == "True"
         log(f"done: {int(ok.sum())} ok, {int((~ok).sum())} failed in this output; {out_gb():.1f} GB, "
             f"{(time.time() - t_start) / 3600:.2f} h")

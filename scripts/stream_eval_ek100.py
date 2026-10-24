@@ -14,6 +14,7 @@ python scripts/stream_eval_ek100.py --work_dir work --video_info EPIC_100_video_
 
 import argparse
 import glob
+import hashlib
 import json
 import os
 import shutil
@@ -37,11 +38,40 @@ def is_extension_video(video_id):
     return len(video_id.split("_")[1]) == 3
 
 
+# Official checksums of every video and its exact path on data.bris.ac.uk, from
+# github.com/epic-kitchens/epic-kitchens-download-scripts (data/md5.csv, commit 4f11fb2), video rows only.
+MD5_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "epic_video_md5.csv")
+_MD5 = None
+
+
+def video_md5(video_id):
+    """(md5, url on data.bris.ac.uk) or (None, None)."""
+    global _MD5
+    if _MD5 is None:
+        _MD5 = {}
+        if os.path.exists(MD5_CSV):
+            for r in pd.read_csv(MD5_CSV).itertuples():
+                base = EK100_EXT_BASE if str(r.version) == "100" else EK55_BASE.rsplit("/videos", 1)[0]
+                _MD5[os.path.basename(r.file_remote_path)[:-4]] = (r.md5, f"{base}/{r.file_remote_path}")
+    return _MD5.get(video_id, (None, None))
+
+
+def md5sum(path):
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1 << 24), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
 def url_candidates(video_id, source="bristol"):
     """source: bristol (official server), hf (mirror, extension videos only), auto (mirror first, then Bristol)."""
     pid, _ = video_id.split("_")
+    exact = video_md5(video_id)[1]  # EK55 videos are under videos/train or videos/test: no 404 round trip
     bristol = ([f"{EK100_EXT_BASE}/{pid}/videos/{video_id}.MP4"] if is_extension_video(video_id) else
                [f"{EK55_BASE}/test/{pid}/{video_id}.MP4", f"{EK55_BASE}/train/{pid}/{video_id}.MP4"])
+    if exact:
+        bristol = [exact] + [u for u in bristol if u != exact]
     hf = [f"{HF_EXT_BASE}/{pid}/videos/{video_id}.MP4"] if is_extension_video(video_id) else []
     if source == "hf":
         return hf
@@ -94,32 +124,70 @@ def check_video(path, ref):
     return None
 
 
-def fetch(video_id, dest, ref, args, log):
+def _remove(*paths):
+    for p in paths:
+        if os.path.exists(p):
+            os.remove(p)
+
+
+def fetch(video_id, dest, ref, args, log, info=None):
+    """Download one video and check it (md5 when known, then decode + fps/duration/resolution).
+
+    An interrupted aria2 download is RESUMED on the next attempt (its .aria2 control file is kept). Before, every
+    attempt started over and an interrupted file, preallocated to full size with zeros at the end ("moov atom not
+    found"), was taken for a corrupt one. `info["md5"]` is set to "ok" (official checksum matched) or "unknown".
+    """
     os.makedirs(os.path.dirname(dest), exist_ok=True)
+    want = video_md5(video_id)[0]
+    urls = url_candidates(video_id, getattr(args, "source", "bristol"))
+    url_i = 0
+    _remove(dest, dest + ".aria2")
     for attempt in range(1, args.tries + 1):
+        complete = False
         if args.copy_from:
             src = glob.glob(os.path.join(args.copy_from, "**", f"{video_id}.MP4"), recursive=True)
             if src:
                 shutil.copy(src[0], dest)
+                complete = True
+            err = None if complete else "not found"
         else:
-            for url in url_candidates(video_id, getattr(args, "source", "bristol")):
-                for p in (dest, dest + ".aria2"):
-                    if os.path.exists(p):
-                        os.remove(p)
+            err = "no url"
+            while url_i < len(urls):
                 cmd = ["aria2c", "-x", str(args.connections), "-s", str(args.connections), "-k", "5M", "-c",
-                       "--check-certificate=false", "--connect-timeout=30", "--timeout=120", "--max-tries=3",
-                       "--retry-wait=10", "--lowest-speed-limit=200K", "--user-agent=Mozilla/5.0", "--allow-overwrite=true",
+                       "--check-certificate=false", "--connect-timeout=30", "--timeout=120", "--max-tries=5",
+                       "--retry-wait=10", "--lowest-speed-limit=100K", "--user-agent=Mozilla/5.0",
+                       "--allow-overwrite=true", "--auto-file-renaming=false",
                        "--console-log-level=error", "--summary-interval=0",
-                       "-d", os.path.dirname(dest), "-o", os.path.basename(dest), url]
-                if subprocess.run(cmd, capture_output=True).returncode == 0:
+                       "-d", os.path.dirname(dest), "-o", os.path.basename(dest), urls[url_i]]
+                rc = subprocess.run(cmd, capture_output=True).returncode
+                if rc == 0 and not os.path.exists(dest + ".aria2"):
+                    complete = True
                     break
-        err = check_video(dest, ref) if os.path.exists(dest) else "download failed"
-        if err is None:
-            return True
+                if rc == 3:  # 404: try the next candidate url
+                    _remove(dest, dest + ".aria2")
+                    url_i += 1
+                    err = "not found on the server"
+                    continue
+                err = f"interrupted (aria2 exit {rc}), will resume"
+                break
+            if url_i == len(urls):
+                log(f"[FAIL] {video_id}: {err}")
+                return False
+        if complete:
+            if want and not args.copy_from:
+                got = md5sum(dest)
+                err = None if got == want else f"md5 mismatch ({got} != {want})"
+            else:
+                err = None
+            if err is None:
+                err = check_video(dest, ref)
+            if err is None:
+                if info is not None:
+                    info["md5"] = "ok" if want and not args.copy_from else "unknown"
+                return True
+            _remove(dest, dest + ".aria2")  # complete but wrong: start this file over
         log(f"[retry {attempt}/{args.tries}] {video_id}: {err}")
-        if os.path.exists(dest):
-            os.remove(dest)
-        time.sleep(min(30 * attempt, 90))
+        time.sleep(min(30 * attempt, 120))
     return False
 
 
