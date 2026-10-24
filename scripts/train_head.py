@@ -43,6 +43,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from cv_probe import participant_folds  # noqa: E402
 from posthoc_ek100 import grid, load_inputs, log_softmax  # noqa: E402
 from vjepa_ek100.metrics import mean_class_recall, topk_hits  # noqa: E402
+from vjepa_ek100.protocol import build_train_clips  # noqa: E402
 
 TASKS = ("verb", "noun", "action")  # = order of the pooler queries in AttentiveClassifier
 LOSSES = ("focal", "ce", "bsm", "la")
@@ -64,8 +65,31 @@ def load_feature_chunks(feats_dir, keys=("clip_id", "pooled")):
     return {k: v[first] for k, v in out.items()}
 
 
+def full_train_index(args, clips):
+    """Labels of EVERY train segment, rebuilt from the train csv (same ids as prepare_train_clips.py).
+
+    train_clips.csv only lists the videos attached when it was written. Features extracted in earlier runs with
+    other videos (e.g. the EK100 extension, then the EK55 part) keep their clip ids, so they are matched here
+    instead of being dropped.
+    """
+    tdf = pd.read_csv(args.train_csv)
+    if "narration_id" not in tdf:  # synthetic data
+        return clips
+    with open(os.path.join(args.work_dir, "classes.json")) as f:
+        cj = json.load(f)
+    full = build_train_clips(tdf, {int(k): int(i) for k, i in cj["verbs"]}, {int(k): int(i) for k, i in cj["nouns"]},
+                             {(int(v), int(n)): int(i) for v, n, i in cj["actions"]}, None,
+                             views=int(clips["view"].max()) + 1 if len(clips) else 1)
+    same = full.set_index("clip_id").reindex(clips.clip_id)[["seg_id", "action_idx"]].values
+    if len(clips) and not np.array_equal(same, clips[["seg_id", "action_idx"]].values):
+        raise SystemExit("train_clips.csv does not match the clip ids rebuilt from the train csv")
+    return full
+
+
 def load_train(args):
     clips = pd.read_csv(os.path.join(args.work_dir, "train_clips.csv"))
+    if args.train_csv:
+        clips = full_train_index(args, clips)
     feats = load_feature_chunks(args.train_feats)
     c = clips.set_index("clip_id").reindex(feats["clip_id"])
     known = c.action_idx.notna().values
