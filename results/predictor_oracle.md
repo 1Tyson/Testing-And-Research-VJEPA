@@ -74,7 +74,7 @@ Hiệu số action (trung bình theo seed; trong ngoặc là khoảng tin cậy 
 sau, script in đúng thứ tự.)
 
 **Đọc kết quả:**
-- **Số tuyệt đối rất thấp** so với probe của Meta (action 1.9 so với 14.1). Lý do: chỉ có khoảng 4.2k clip để train cho 3806 lớp action,
+- **Số tuyệt đối rất thấp** so với probe của Meta (action 1.9 so với 14.1). Lý do: chỉ có khoảng 4.2k clip để train cho 3568 lớp action,
   rất nhiều lớp ở fold test không hề xuất hiện ở fold train, và token đã bị pool. Vì vậy chỉ so sánh các biến thể với nhau.
 - **Token tương lai thật chứa nhiều thông tin hơn hẳn**: action tăng khoảng ×1.9, verb +4.4, noun +3.2, và khoảng tin cậy không chứa 0.
   Riêng `real` (chỉ một bước tương lai) đã tốt ngang `enc_real`. Ở giao thức `action_start`, bước được dự đoán chính là lúc action bắt
