@@ -94,15 +94,66 @@ với `focal`, rồi giảm). Ở `action_start`, pooler chưa từng thấy ki�
 **Hệ quả:** train lại bộ phân loại trên một pooler đóng băng chỉ có ích khi pooler không bị "khớp" vào chính các clip đó; muốn cải thiện ở
 giao thức `official` phải train lại cả pooler (bước 4), hoặc tách clip train mà pooler chưa thấy.
 
+## Lần chạy 3: toàn bộ tập train (67k clip, 32 người, cả 2 anchor)
+
+Train: đủ 495 video (phần mở rộng từ Hugging Face + phần EK55 từ Bristol, mỗi video EK55 đã đối chiếu md5 chính thức), 66,958 clip
+`action_start` / 66,951 clip `official` (bỏ các cửa sổ vượt quá cuối video). Epoch chọn trên 9,502 clip của các người tham gia train
+được giữ lại. Val như cũ (bản 292p). Action R@5, mean ± std qua 3 seed, clean / official; CI95: bootstrap của (action thô − meta).
+
+**`official` (giao thức của code Meta, để so với 32.7):**
+
+| recipe | action | action + post-hoc | verb | noun | CI95 | holdout (train) |
+|---|---|---|---|---|---|---|
+| meta | 30.86 / 32.20 | 37.61 / 38.67 | 51.66 / 58.48 | 50.57 / 51.49 | | (57.05*) |
+| focal | 31.10±0.23 / 32.97 | 38.02 / 39.47 | 54.50 / 60.18 | 53.18 / 54.34 | [−0.43, +1.00] | 48.07 |
+| ce | 27.80±0.00 / 30.35 | 37.19 / 38.98 | 50.54 / 55.64 | 51.20 / 52.18 | [−3.47, −1.81] | 30.29 |
+| bsm | 32.41±0.98 / 34.28 | 35.51 / 37.68 | 70.87 / 74.41 | 56.65 / 56.90 | [+1.37, +3.32] | 47.13 |
+| **bsm+compose** | **38.11±0.17 / 39.40** | 38.20 / 39.58 | **71.55 / 74.45** | **57.83 / 57.65** | **[+5.08, +7.18]** | **53.73** |
+| la+compose | 37.28±0.64 / 39.43 | 38.36 / 40.27 | 65.75 / 70.35 | 56.14 / 57.04 | [+4.66, +6.68] | 51.37 |
+| ce+compose | 33.04±0.66 / 35.52 | 38.71 / 40.37 | 49.39 / 53.65 | 49.91 / 50.85 | [+2.24, +3.74] | 42.63 |
+| bsm+compose+random | 35.47±0.17 / 37.66 | 36.73 / 39.12 | 69.26 / 72.34 | 57.16 / 58.61 | [+2.76, +5.11] | 33.45 |
+
+**`action_start` (giao thức chuẩn EK100):**
+
+| recipe | action | action + post-hoc | verb | noun | CI95 | holdout (train) |
+|---|---|---|---|---|---|---|
+| meta | 14.10 / 12.85 | 16.80 / 14.87 | 27.43 / 27.88 | 36.45 / 34.42 | | (31.79*) |
+| focal | 15.96±0.38 / 15.95 | 19.81 / 18.94 | 29.17 / 30.14 | 37.02 / 35.63 | [+1.63, +3.08] | 28.35 |
+| ce | 14.42±0.20 / 14.44 | 19.65 / 19.14 | 26.22 / 27.01 | 33.46 / 32.66 | [+0.00, +1.36] | 16.43 |
+| bsm | 17.92±0.46 / 17.15 | 19.15 / 18.49 | 48.60 / 48.40 | 40.58 / 37.77 | [+2.96, +4.68] | 30.60 |
+| **bsm+compose** | **19.88±0.30 / 19.19** | 20.18 / 19.43 | 49.05 / 48.56 | 40.74 / 38.07 | **[+4.19, +6.24]** | **36.02** |
+| la+compose | 20.24±0.33 / 19.76 | 20.52 / 19.91 | 39.93 / 41.15 | 39.77 / 37.87 | [+5.46, +7.25] | 33.67 |
+| ce+compose | 16.99±0.33 / 16.83 | 20.84 / 20.33 | 24.95 / 26.06 | 32.85 / 32.13 | [+2.67, +4.00] | 23.80 |
+| bsm+compose+random | 20.22±0.08 / 20.51 | 21.16 / 21.17 | 48.77 / 51.39 | 38.13 / 36.89 | [+4.10, +6.16] | 18.51 |
+
+\* Không so được (probe Meta đã train trên các clip đó).
+
+**Đọc kết quả:**
+- **Recipe được chọn trên holdout của train (không nhìn val) là `bsm+compose` ở cả 2 anchor.** `official`: **39.40** (cách đếm của
+  Meta) so với 32.20 của probe Meta trên cùng bản 292p, **+7.2 điểm**, CI [+5.08, +7.18] (clean); cao hơn cả cách chỉnh post-hoc trên
+  probe Meta (38.67, có dùng val để cross-fit), mà không cần chỉnh gì trên val. `action_start`: 19.88 so với 14.10, **+5.8**.
+- **Verb tăng mạnh nhất:** 58.5 → 74.5 (official), 27.4 → 49.1 (action_start); noun tăng ít hơn (+6, +4). Đúng như phân tích trước: probe
+  Meta thiên về các verb phổ biến (take, put, wash...), cân bằng lớp sửa phần lớn điều đó.
+- **Đính chính kết luận của lần 1 ở `official`:** lần 1 mọi head train lại đều thua probe Meta, và mình đã giải thích là pooler "khớp" vào
+  các clip train. Với toàn bộ tập train, điều đó không còn: `focal` (chỉ train tiếp) ≈ meta, `bsm+compose` +7.2. Nguyên nhân chính của
+  lần 1 là **thiếu dữ liệu** (55.7% segment, và chỉ 84% số đó ở `official`): prior và phân phối lớp lệch khỏi toàn bộ train.
+- **Khởi tạo:** ở `action_start`, khởi tạo ngẫu nhiên giờ ngang khởi tạo từ Meta (20.22 so với 19.88; lần 2: −6.7). Khoảng cách lần 2
+  là do head Meta mang theo tri thức của phần dữ liệu ta chưa có, không phải do khởi tạo tốt hơn. Ở `official` vẫn còn khoảng cách
+  (35.47 so với 38.11), và holdout của bản ngẫu nhiên thấp hẳn (33 so với 54).
+- **Post-hoc sau khi train gần như không thêm gì** cho `bsm+compose` (+0.1 đến +0.3): cân bằng lúc train đã làm việc của logit adjustment.
+  Với CE (`ce+compose`) post-hoc thêm +5: hai cách gần như thay thế nhau.
+- `la+compose` (τ = 0.5) ngang `bsm+compose` trên val (trong khoảng nhiễu), nhưng thấp hơn trên holdout nên không được chọn.
+
 ## Giới hạn
 
-- Train mới có phần mở rộng (55.7%, 18 người): prior, người tham gia và camera khác toàn bộ train. Cần chạy lại khi có phần EK55.
-- Val nén crf 12 yuv444p, train nén crf 18 yuv420p.
+- ~~Train mới có phần mở rộng (55.7%)~~: đã đủ ở lần chạy 3.
+- Val nén crf 12 yuv444p, train nén crf 18 yuv420p. Mọi số là trên bản 292p của val: probe Meta đạt 32.20 ở đây so với 32.7 trên video
+  gốc; mức tăng được đo trên cùng một bản.
 - Epoch chọn trên 2 người tham gia được giữ lại, nên nhiễu. Nhiều recipe chọn epoch rất sớm (1–3).
 - Chưa đo trên video gốc. Số cuối cùng nên đo lại bằng `stream_eval_ek100.py --eval_args "--save_pooled"` khi Bristol hoạt động lại.
 
 ## Việc tiếp theo
 
-1. ~~Tách đóng góp~~ (đã làm, xem trên).
-2. Thêm view ngẫu nhiên (augmentation theo config train của Meta), xem `bsm+compose` có tăng tiếp không.
-3. Trích nốt `official` và phần EK55 của train khi có video.
+1. ~~Tách đóng góp~~ (lần 2). ~~Toàn bộ tập train, cả 2 anchor~~ (lần 3).
+2. Đo lại head `bsm+compose` trên **video val gốc** (data.bris.ac.uk), để có con số so trực tiếp với 32.7.
+3. Thêm view ngẫu nhiên (augmentation theo config train của Meta), xem `bsm+compose` có tăng tiếp không.
